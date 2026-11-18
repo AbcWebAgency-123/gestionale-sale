@@ -151,7 +151,7 @@ function renderGrid() {
   }
   for (const b of dayBookings) {
     const ri = rooms.findIndex((r) => r.id === b.room_id); if (ri < 0) continue;
-    const r = rooms[ri]; const s = slotIndex(b.start); const e = slotIndex(b.end); const span = e - s;
+    const r = rooms[ri]; const s = Math.floor(slotIndex(b.start)); const e = Math.max(s + 1, Math.ceil(slotIndex(b.end))); const span = e - s;
     const own = b.own_company;
     const style = own
       ? `background:${r.color};border-color:${r.color};color:#fff`
@@ -195,7 +195,7 @@ function renderGrid() {
     if (a === b) {
       const want = Math.min(a + Math.round(60 / state.cfg.slot_minutes), slotsCount());
       end = a + 1;
-      while (end < want && !dayBookings.some((x) => x.room_id === room && slotIndex(x.start) <= end && slotIndex(x.end) > end)) end++;
+      while (end < want && !dayBookings.some((x) => x.room_id === room && Math.floor(slotIndex(x.start)) <= end && Math.ceil(slotIndex(x.end)) > end)) end++;
     }
     bookingModal({ date: state.date, room_id: room, start: slotTime(a), end: slotTime(end) }, paint);
   };

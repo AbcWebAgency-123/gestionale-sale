@@ -608,9 +608,8 @@ route('DELETE', '/api/bookings/:id', (req, res, ctx) => {
     const row = db.prepare('SELECT * FROM bookings WHERE id=?').get(id);
     // se la riunione è già iniziata, si chiude adesso invece di cancellarla (resta nello storico)
     if (row.date === n.date && toMin(row.start) < n.min && toMin(row.end) > n.min) {
-      const s = S(); const open = toMin(s.open_time);
-      const endMin = open + Math.ceil((n.min - open) / s.slot) * s.slot;
-      db.prepare(`UPDATE bookings SET end=?, ended_early_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(toHHMM(Math.max(endMin, toMin(row.start) + s.slot)), id);
+      // riunione già iniziata: si chiude in questo momento e la sala torna subito libera
+      db.prepare(`UPDATE bookings SET end=?, ended_early_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(n.time, id);
     } else {
       db.prepare(`UPDATE bookings SET status='cancellata', updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(id);
     }
@@ -669,9 +668,9 @@ route('POST', '/api/display/end', (req, res, ctx) => {
   const n = now(); const s = S();
   const b = db.prepare(`SELECT * FROM bookings WHERE id=? AND room_id=? AND date=? AND status='confermata'`).get(+ctx.body.booking_id, a.room.id, n.date);
   need(b && toMin(b.start) <= n.min && n.min < toMin(b.end), 400, 'Nessuna riunione in corso');
-  const open = toMin(s.open_time);
-  const endMin = Math.max(open + Math.ceil((n.min + 1 - open) / s.slot) * s.slot, toMin(b.start) + s.slot);
-  db.prepare('UPDATE bookings SET end=?, ended_early_at=CURRENT_TIMESTAMP WHERE id=?').run(toHHMM(Math.min(endMin, toMin(b.end))), b.id);
+  // la sala torna libera subito (l'orario reale di fine resta nello storico)
+  db.prepare('UPDATE bookings SET end=?, ended_early_at=CURRENT_TIMESTAMP WHERE id=?').run(n.min > toMin(b.start) ? n.time : b.start, b.id);
+  if (n.min <= toMin(b.start)) db.prepare(`UPDATE bookings SET status='cancellata' WHERE id=?`).run(b.id);
   audit(null, 'termina_display', { booking: b.id });
   broadcast(); send(res, 200, { ok: true });
 }, { public: true });
