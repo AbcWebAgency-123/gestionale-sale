@@ -6,6 +6,5 @@ ENV NODE_ENV=production \
     PORT=3000 \
     DATA_DIR=/data \
     TIMEZONE=Europe/Rome
-VOLUME ["/data"]
 EXPOSE 3000
 CMD ["node", "--no-warnings", "server.js"]
