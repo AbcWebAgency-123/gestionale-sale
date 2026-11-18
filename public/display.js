@@ -90,7 +90,7 @@ function render() {
 
   root.innerHTML = `<div class="screen s-${s}">
     <section class="main">
-      <div class="room-label"><span class="chip">Sala riunioni</span></div>
+      <div class="room-label"><img class="logo" src="brand/logo-bianco.png" alt="CARDO Centro Uffici"></div>
       <div class="room-name">${esc(room.name)}</div>
       <div class="room-meta"><span>👥 ${room.capacity} posti</span>${room.location ? `<span>📍 ${esc(room.location)}</span>` : ''}${room.equipment ? `<span>🖥 ${esc(room.equipment)}</span>` : ''}</div>
       <div class="status">
@@ -124,8 +124,8 @@ function renderLobby(n) {
       <div class="lnext">${nxt}</div></div>`;
   }).join('');
   root.innerHTML = `<div class="lobby">
-    <div class="lobby-head"><div><h1>Sale riunioni</h1><p>${esc(st.building_name)} · ${dateLong(n.date)}</p></div><div class="clock" id="clock">${n.time}</div></div>
-    <div class="lobby-grid">${cards}</div></div>`;
+    <div class="lobby-head"><div><img class="lobby-logo" src="brand/logo-bianco.png" alt="CARDO Centro Uffici"><h1>Sale riunioni</h1><p>${esc(st.building_name)} · ${dateLong(n.date)}</p></div><div class="clock" id="clock">${n.time}</div></div>
+    <div class="lobby-grid" style="grid-template-columns:repeat(${st.rooms.length <= 3 ? st.rooms.length : Math.ceil(st.rooms.length / 2)}, 1fr)">${cards}</div></div>`;
 }
 
 function bindActions() {

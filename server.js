@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS audit (
 `);
 
 const DEFAULT_SETTINGS = {
-  building_name: 'Centro Direzionale',
+  building_name: 'CARDO Centro Uffici',
   open_time: '08:00',
   close_time: '18:00',
   slot_minutes: '30',
@@ -181,11 +181,11 @@ function seed() {
   const roomCount = db.prepare('SELECT COUNT(*) c FROM rooms').get().c;
   if (roomCount === 0) {
     const rooms = [
-      ['Sala Verdi', 12, 'Piano terra', 'Schermo 75", videoconferenza, lavagna', '#2563eb'],
-      ['Sala Puccini', 8, 'Piano terra', 'Schermo 55", videoconferenza', '#059669'],
-      ['Sala Rossini', 6, 'Primo piano', 'Schermo 55"', '#d97706'],
-      ['Sala Vivaldi', 4, 'Primo piano', 'Monitor 43", ideale per call', '#7c3aed'],
-      ['Sala Conferenze', 30, 'Secondo piano', 'Proiettore, microfoni, impianto audio', '#dc2626'],
+      ['Sala Verdi', 12, 'Piano terra', 'Schermo 75", videoconferenza, lavagna', '#0a615f'],
+      ['Sala Puccini', 8, 'Piano terra', 'Schermo 55", videoconferenza', '#a7406b'],
+      ['Sala Rossini', 6, 'Primo piano', 'Schermo 55"', '#b9771f'],
+      ['Sala Vivaldi', 4, 'Primo piano', 'Monitor 43", ideale per call', '#5b8a72'],
+      ['Sala Conferenze', 30, 'Secondo piano', 'Proiettore, microfoni, impianto audio', '#4a5a86'],
     ];
     const ins = db.prepare('INSERT INTO rooms(name,capacity,location,equipment,color,display_token,sort_order) VALUES (?,?,?,?,?,?,?)');
     rooms.forEach((r, i) => ins.run(...r, crypto.randomBytes(16).toString('hex'), i));
@@ -263,6 +263,13 @@ function seedDemo() {
   console.log('Dati demo creati: 60 aziende, utenti referente@<azienda>.it / utente@<azienda>.it, password demo1234');
 }
 seed();
+
+// Aggiornamento al tema CARDO per installazioni create con i valori iniziali precedenti
+(function migrateBrand() {
+  db.prepare("UPDATE settings SET value='CARDO Centro Uffici' WHERE key='building_name' AND value='Centro Direzionale'").run();
+  const map = { '#2563eb': '#0a615f', '#059669': '#a7406b', '#d97706': '#b9771f', '#7c3aed': '#5b8a72', '#dc2626': '#4a5a86' };
+  for (const [a, b] of Object.entries(map)) db.prepare('UPDATE rooms SET color=? WHERE lower(color)=?').run(b, a);
+})();
 
 // ---------------------------------------------------------------- regole prenotazione
 // Libera automaticamente le prenotazioni senza check-in (se il check-in è obbligatorio)
@@ -884,7 +891,7 @@ route('GET', '/api/admin/backup', (req, res, ctx) => {
 }, A);
 
 // ---------------------------------------------------------------- static
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.webmanifest': 'application/manifest+json' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8' };
 function serveStatic(req, res, pathname) {
   if (pathname === '/') pathname = '/index.html';
   if (pathname === '/display') pathname = '/display.html';

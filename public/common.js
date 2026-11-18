@@ -111,9 +111,9 @@ function renderTopbar(me, active, building) {
   const bar = document.createElement('header');
   bar.className = 'topbar';
   bar.innerHTML = `
-    <a class="brand" href="index.html">
-      <span class="brand-logo"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 10h18M9 4v16"/></svg></span>
-      <span><b>Sale Riunioni</b><small>${esc(building || '')}</small></span>
+    <a class="brand" href="index.html" title="${esc(building || '')}">
+      <img src="brand/logo-bianco.png" alt="${esc(building || 'CARDO Centro Uffici')}">
+      <span class="brand-sub">Sale<br>riunioni</span>
     </a>
     <nav class="tabs">${tabs.map(([href, key, label, icon]) => `<a href="${href}" data-tab="${key}" class="tab ${key === active ? 'active' : ''}"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${icon}</svg><span>${label}</span></a>`).join('')}</nav>
     <div class="user-menu">

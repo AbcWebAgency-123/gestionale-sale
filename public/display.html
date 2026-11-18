@@ -6,23 +6,27 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="icon" type="image/png" href="brand/favicon.png">
+  <link rel="apple-touch-icon" href="brand/icon-512.png">
+  <meta name="theme-color" content="#0a615f">
   <title>Display sala</title>
   <style>
-    :root { --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+    :root { --font: "Manrope", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; --serif: "Cormorant Garamond", Georgia, serif; }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; overflow: hidden; }
-    body { font-family: var(--font); color: #fff; background: #0b1220; -webkit-font-smoothing: antialiased; user-select: none; -webkit-tap-highlight-color: transparent; cursor: default; }
+    body { font-family: var(--font); color: #fff; background: #0f1f1e; -webkit-font-smoothing: antialiased; user-select: none; -webkit-tap-highlight-color: transparent; cursor: default; }
     .screen { position: fixed; inset: 0; display: grid; grid-template-columns: 1.45fr 1fr; transition: background .8s ease; }
     .screen::before { content: ""; position: absolute; inset: 0; background: radial-gradient(900px 700px at 0% 0%, rgba(255,255,255,.14), transparent 60%); pointer-events: none; }
-    .s-libera { background: linear-gradient(140deg, #059669 0%, #047857 55%, #065f46 100%); }
-    .s-occupata { background: linear-gradient(140deg, #dc2626 0%, #b91c1c 55%, #7f1d1d 100%); }
-    .s-in_arrivo { background: linear-gradient(140deg, #f59e0b 0%, #d97706 55%, #92400e 100%); }
-    .s-chiusa, .s-fuori_orario { background: linear-gradient(140deg, #334155 0%, #1e293b 60%, #0f172a 100%); }
+    .s-libera { background: linear-gradient(140deg, #0f8a74 0%, #0a615f 55%, #063f3d 100%); }
+    .s-occupata { background: linear-gradient(140deg, #c2557f 0%, #a7406b 50%, #6e2445 100%); }
+    .s-in_arrivo { background: linear-gradient(140deg, #d6973f 0%, #b9771f 55%, #7a4a10 100%); }
+    .s-chiusa, .s-fuori_orario { background: linear-gradient(140deg, #2c4a49 0%, #1b3332 60%, #0f1f1e 100%); }
 
     .main { position: relative; padding: 5vh 4.5vw; display: flex; flex-direction: column; min-width: 0; }
     .room-label { display: flex; align-items: center; gap: 14px; }
     .room-label .chip { font-size: 1.6vh; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; padding: .6vh 1.2vh; border-radius: 99px; background: rgba(255,255,255,.18); }
-    .room-name { font-size: 6.4vh; font-weight: 800; letter-spacing: -.02em; margin: 1.4vh 0 .6vh; line-height: 1.05; }
+    .room-name { font-variant-numeric: lining-nums; font-family: var(--serif); font-size: 8.4vh; font-weight: 700; letter-spacing: 0; margin: 1.4vh 0 .6vh; line-height: 1.05; }
     .room-meta { font-size: 2.1vh; opacity: .8; display: flex; gap: 2.4vh; flex-wrap: wrap; }
     .status { margin-top: auto; }
     .status-word { font-size: 15vh; font-weight: 900; letter-spacing: -.04em; line-height: .9; text-transform: uppercase; }
@@ -37,7 +41,8 @@
     .act { font: inherit; font-size: 2.3vh; font-weight: 700; color: inherit; border: 2px solid rgba(255,255,255,.7); background: rgba(255,255,255,.12); padding: 1.8vh 3.4vh; border-radius: 1.8vh; cursor: pointer; transition: .15s; }
     .act:active { transform: scale(.97); }
     .act.primary { background: #fff; color: #0f172a; border-color: #fff; }
-    .act.confirm { background: #fff; color: #b91c1c; border-color: #fff; }
+    .act.confirm { background: #fff; color: #a7406b; border-color: #fff; }
+    .act.primary { color: #0a615f; }
     .footer-hint { margin-top: 3vh; font-size: 1.8vh; opacity: .75; }
 
     .side { position: relative; background: rgba(2, 6, 23, .28); border-left: 1px solid rgba(255,255,255,.12); padding: 5vh 3.4vw; display: flex; flex-direction: column; min-width: 0; backdrop-filter: blur(4px); }
@@ -62,19 +67,22 @@
     .fs-btn { position: fixed; right: 1.6vh; bottom: 1.6vh; width: 5vh; height: 5vh; border-radius: 1.2vh; border: 0; background: rgba(255,255,255,.12); color: #fff; font-size: 2.4vh; cursor: pointer; opacity: .5; z-index: 10; }
 
     /* vista atrio: tutte le sale */
-    .lobby { position: fixed; inset: 0; background: radial-gradient(1200px 700px at 0% 0%, #1e1b4b 0%, transparent 60%), #0b1220; padding: 4.5vh 4vw; display: flex; flex-direction: column; }
+    .lobby { position: fixed; inset: 0; background: radial-gradient(1200px 700px at 0% 0%, #0c6c69 0%, transparent 60%), radial-gradient(900px 600px at 100% 100%, rgba(167,64,107,.35), transparent 60%), #0a2e2d; padding: 4.5vh 4vw; display: flex; flex-direction: column; }
     .lobby-head { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 4vh; }
-    .lobby-head h1 { margin: 0; font-size: 5vh; letter-spacing: -.02em; }
+    .lobby-head h1 { margin: 0; font-family: var(--serif); font-size: 6vh; font-weight: 700; }
+    .lobby-logo { height: 7vh; width: auto; display: block; margin-bottom: 1.6vh; }
+    .logo { height: 5.4vh; width: auto; display: block; }
+    .status, .room-label, .room-name, .room-meta { position: relative; z-index: 1; }
     .lobby-head p { margin: .6vh 0 0; opacity: .65; font-size: 2.1vh; }
     .lobby-grid { flex: 1; display: grid; grid-template-columns: repeat(auto-fit, minmax(30vh, 1fr)); gap: 2.2vh; align-content: stretch; }
     .lc { border-radius: 2.4vh; padding: 3vh; display: flex; flex-direction: column; position: relative; overflow: hidden; min-height: 0; }
-    .lc h2 { margin: 0; font-size: 3.4vh; letter-spacing: -.01em; }
+    .lc h2 { margin: 0; font-variant-numeric: lining-nums; font-family: var(--serif); font-size: 4.2vh; font-weight: 700; }
     .lc .lm { font-size: 1.8vh; opacity: .8; margin-top: .6vh; }
     .lc .lst { font-size: 5.4vh; font-weight: 900; text-transform: uppercase; letter-spacing: -.02em; margin-top: auto; }
     .lc .lsub { font-size: 2.1vh; font-weight: 600; opacity: .9; }
     .lc .lnext { margin-top: 2vh; padding-top: 1.6vh; border-top: 1px solid rgba(255,255,255,.25); font-size: 1.9vh; opacity: .9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-    .setup { position: fixed; inset: 0; display: grid; place-items: center; background: #0f172a; padding: 40px; text-align: center; }
+    .setup { position: fixed; inset: 0; display: grid; place-items: center; background: #0a2e2d; padding: 40px; text-align: center; }
     .setup div { max-width: 640px; }
     .setup h1 { font-size: 34px; }
     .setup p { opacity: .75; font-size: 18px; line-height: 1.5; }

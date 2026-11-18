@@ -58,7 +58,7 @@ function route() {
 
 function showLogin() {
   $('#login').classList.remove('hidden');
-  const demo = [['Sala Verdi', '#60a5fa', 'Libera'], ['Sala Puccini', '#34d399', 'Occupata'], ['Sala Rossini', '#fbbf24', 'Libera'], ['Sala Vivaldi', '#a78bfa', 'Libera'], ['Conferenze', '#f87171', 'Occupata']];
+  const demo = [['Sala 1', '#5fd0b8', 'Libera'], ['Sala 2', '#f08bb2', 'Occupata'], ['Sala 3', '#e8b765', 'Libera'], ['Sala 4', '#5fd0b8', 'Libera'], ['Sala 5', '#f08bb2', 'Occupata']];
   $('#login-preview').innerHTML = demo.map(([n, c, s]) => `<div><i style="background:${c}"></i><span>${n}<br><span style="opacity:.7;font-weight:500">${s}</span></span></div>`).join('');
   $('#login-form').onsubmit = async (e) => {
     e.preventDefault();
@@ -81,12 +81,12 @@ function renderCalendarShell() {
       <div class="week-strip" id="week"></div>
       <input type="date" class="date-input" id="pick-date" title="Vai a una data">
       <div style="flex:1"></div>
-      <button class="btn btn-primary" id="new-bk">${ICON.plus} Nuova prenotazione</button>
+      <button class="btn btn-accent" id="new-bk">${ICON.plus} Nuova prenotazione</button>
     </div>
     <div class="card grid-card"><div class="grid-scroll" id="grid-wrap"></div></div>
     <div class="legend">
       <span><i style="background:var(--primary);border-color:var(--primary)"></i>Prenotazioni della tua azienda</span>
-      <span><i style="background:#eef2ff;border-color:#c7d2fe"></i>Prenotate da altre aziende</span>
+      <span><i style="background:#e6f1ef;border-color:#b5d4d0"></i>Prenotate da altre aziende</span>
       <span><i style="background:repeating-linear-gradient(-45deg,#fafbfd,#fafbfd 3px,#eceff5 3px,#eceff5 6px);border-color:var(--line)"></i>Orario passato</span>
       <span style="margin-left:auto">Suggerimento: clicca su uno spazio libero, oppure trascina per scegliere più mezz'ore.</span>
     </div>`;
@@ -366,7 +366,7 @@ async function renderMine() {
       <h1>Le mie prenotazioni</h1><div class="spacer"></div>
       ${state.me.company_id ? `<div class="seg" id="seg-scope"><button data-v="mine" class="${mineState.scope === 'mine' ? 'active' : ''}">Mie</button><button data-v="company" class="${mineState.scope === 'company' ? 'active' : ''}">Tutta ${esc(state.me.company_name)}</button></div>` : ''}
       <div class="seg" id="seg-time"><button data-v="0" class="${!mineState.past ? 'active' : ''}">Prossime</button><button data-v="1" class="${mineState.past ? 'active' : ''}">Passate</button></div>
-      <button class="btn btn-primary" id="mine-new">${ICON.plus} Nuova prenotazione</button>
+      <button class="btn btn-accent" id="mine-new">${ICON.plus} Nuova prenotazione</button>
     </div>
     <div class="mine-layout">
       <div>${Object.keys(groups).length ? Object.entries(groups).map(([d, list]) => `
