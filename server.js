@@ -199,8 +199,8 @@ function seed() {
     console.log('\n==================================================');
     console.log(' Utente amministratore creato');
     console.log(`   email:    ${email}`);
-    console.log(`   password: ${pw}`);
-    console.log('   (verrà chiesto di cambiarla al primo accesso)');
+    console.log(process.env.ADMIN_PASSWORD ? '   password: quella impostata in ADMIN_PASSWORD' : `   password: ${pw}`);
+    console.log('   (cambiala dal menu utente dopo il primo accesso)');
     console.log('==================================================\n');
   }
   // Festività nazionali italiane (anno corrente e successivo)
