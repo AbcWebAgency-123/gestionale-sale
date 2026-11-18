@@ -1,0 +1,13 @@
+{
+  "name": "gestionale-sale-riunioni",
+  "version": "1.0.0",
+  "description": "Prenotazione sale riunioni condivise per uno stabile multi-azienda, con display per tablet fuori dalle sale",
+  "main": "server.js",
+  "private": true,
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "demo": "SEED_DEMO=1 node --no-warnings server.js"
+  },
+  "license": "UNLICENSED"
+}

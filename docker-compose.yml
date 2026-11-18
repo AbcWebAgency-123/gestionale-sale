@@ -1,0 +1,14 @@
+services:
+  sale:
+    build: .
+    container_name: gestionale-sale
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      TIMEZONE: Europe/Rome
+      ADMIN_EMAIL: admin@sale.local
+      # ADMIN_PASSWORD: cambiami   # se omessa viene generata e stampata nei log al primo avvio
+      # COOKIE_SECURE: "1"         # attivare quando il sito è servito in HTTPS
+    volumes:
+      - ./data:/data
