@@ -113,6 +113,7 @@ function renderCalendarShell() {
       <input type="date" class="date-input" id="pick-date" title="Vai a una data">
       <div style="flex:1"></div>
       <div id="quota-box"></div>
+      ${state.cfg.rooms.some(isGym) ? '<button class="btn btn-ghost" id="new-gym">🏋️ Palestra</button>' : ''}
       <button class="btn btn-accent" id="new-bk">${ICON.plus} Nuova prenotazione</button>
     </div>
     <div id="quota-banner"></div>
@@ -128,6 +129,7 @@ function renderCalendarShell() {
   $('#today').onclick = () => go(nextWorkday(nowLocal().date));
   $('#pick-date').onchange = (e) => e.target.value && go(nextWorkday(e.target.value));
   $('#new-bk').onclick = () => bookingModal({ date: state.date });
+  $('#new-gym')?.addEventListener('click', () => gymFlow({ date: state.date }));
 }
 function go(d) { state.date = d; loadDay(); }
 
@@ -351,8 +353,9 @@ async function bookingModal(b, onClose) {
         <span class="avail ${busy ? 'ko' : 'ok'}">${warn ? '—' : busy ? `Occupata ${busy.start}–${busy.end}` : '● Disponibile'}</span>
         <span class="cap-warn">Troppo piccola per ${att} persone</span>
       </label>`;
-    }).join('');
+    }).join('') + (!editing && cfg.rooms.some(isGym) ? `<button type="button" class="room-opt gym-opt" id="to-gym"><b><i style="background:${cfg.rooms.find(isGym).color}"></i>🏋️ ${esc(cfg.rooms.find(isGym).name)}</b><small>Prenotazione a persona, un'ora alla volta</small><span class="avail ok">Prenota la palestra →</span></button>` : '');
     $$('.room-opt input', m.el).forEach((i) => i.onchange = () => { f.room_id = +i.value; $$('.room-opt', m.el).forEach((x) => x.classList.toggle('checked', x.contains(i))); });
+    $('#to-gym', m.el)?.addEventListener('click', () => { const d = form.date.value; const st = sStart.value; m.close(); setTimeout(() => gymFlow({ date: d, start: toHHMM(Math.floor(toMin(st) / 60) * 60) }), 220); });
     $('#bk-err', m.el).textContent = warn;
   };
   sStart.onchange = () => { fillEnd(); refresh(); };
