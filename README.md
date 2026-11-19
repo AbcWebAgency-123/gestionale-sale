@@ -138,10 +138,51 @@ Per ripristinare un backup: ferma l'applicazione, sostituisci `data/sale.db` con
 
 ---
 
+## 6. Novità: registrazione, monte ore, palestra, penali
+
+### Email (obbligatorie per la registrazione)
+Il gestionale invia email per: conferma iscrizione, credenziali, conferma prenotazione (con file calendario), promemoria 24 ore prima, penali, modulo palestra e relativo esito, recupero password.
+Configura queste variabili d'ambiente (su Railway: servizio → Variables):
+
+| Variabile | Esempio |
+|---|---|
+| `SMTP_HOST` | `smtp.tuoprovider.it` |
+| `SMTP_PORT` | `587` (STARTTLS) oppure `465` (SSL) |
+| `SMTP_USER` | `noreply@ufficicardo.com` |
+| `SMTP_PASS` | password della casella o "password per app" |
+| `SMTP_FROM` | `CARDO Centro Uffici <noreply@ufficicardo.com>` |
+| `PUBLIC_URL` | `https://sale.ufficicardo.com` (facoltativo: indirizzo usato nei link delle email) |
+
+Finché l'SMTP non è configurato le email restano in coda (Amministrazione → Email inviate) e partono da sole appena lo configuri.
+Gmail/Google Workspace: `smtp.gmail.com`, porta 465, con una "password per le app". Microsoft 365: `smtp.office365.com`, porta 587.
+
+### Registrazione autonoma
+Pagina `/registrazione`: nome, cognome, azienda, email. L'utente riceve un link di conferma (valido 48 ore); cliccandolo l'account si attiva e riceve via email la password generata dal sistema. Se l'azienda esiste già (anche scritta in modo leggermente diverso, es. "Alfa S.r.l." / "ALFA srl") l'utente viene aggiunto ai colleghi; altrimenti l'azienda viene creata e il primo iscritto diventa referente.
+
+### Monte ore
+Ogni azienda ha 10 ore di sala riunioni al mese (modificabile in Regole e impostazioni o per singola azienda). Superata la soglia non può più prenotare fino al mese successivo. Il contatore è visibile in alto nel calendario. La palestra non scala dal monte ore.
+
+### Promemoria e penali
+- Promemoria via email 24 ore prima di ogni prenotazione.
+- Check-in obbligatorio sul tablet entro 15 minuti dall'inizio: senza check-in la prenotazione viene liberata e si registra una **penale per mancato utilizzo**.
+- Annullare con meno di 24 ore di preavviso registra una **penale per annullamento tardivo**.
+- Importo e preavviso si impostano in Regole e impostazioni. Le penali si gestiscono in Amministrazione → Penali (segna addebitata / annulla, esporta CSV).
+
+### Palestra
+Una sala può essere impostata come **Palestra** (Sale e display → Modifica → Tipo). Si prenota un'ora alla volta indicando Uomo o Donna; regola predefinita: massimo 1 uomo + 1 donna per ora.
+Alla prima prenotazione l'utente scarica il modulo di responsabilità, lo firma e lo carica: il file viene inviato automaticamente a info@ufficicardo.com (modificabile) e compare in Amministrazione → Palestra e moduli, dove va approvato. Dopo l'approvazione l'utente riceve un'email e può prenotare.
+Il modello di modulo incluso è una bozza standard: fallo verificare dal vostro legale o caricate il vostro PDF dalla stessa pagina.
+
+---
+
 ## Struttura del progetto
 
 ```
 server.js          server, database, regole e API
+lib/mailer.js      invio email SMTP con coda e tentativi automatici
+lib/templates.js   modelli delle email
+public/registrazione.html, conferma.html   iscrizione e conferma
+public/modulo-palestra.pdf                 modello del modulo di responsabilità
 public/
   index.html       accesso e prenotazione per gli utenti
   app.js

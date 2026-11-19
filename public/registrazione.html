@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="icon" type="image/png" href="brand/favicon.png">
+  <meta name="theme-color" content="#0a615f">
+  <title>Registrazione — CARDO Centro Uffici</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-art">
+      <img class="login-logo" src="brand/logo-bianco.png" alt="CARDO Centro Uffici">
+      <div style="position:relative;z-index:1">
+        <h1>Registra la tua azienda <em>in un minuto.</em></h1>
+        <p>Inserisci i tuoi dati: riceverai un'email per confermare l'iscrizione e subito dopo la password per accedere e prenotare sale e palestra.</p>
+      </div>
+      <ol class="steps-art">
+        <li><b>1</b><span>Compila il modulo</span></li>
+        <li><b>2</b><span>Conferma dal link nell'email</span></li>
+        <li><b>3</b><span>Ricevi la password e prenota</span></li>
+      </ol>
+    </div>
+    <div class="login-form">
+      <form id="reg-form" autocomplete="on" novalidate>
+        <img class="login-emblem" src="brand/emblema.png" alt="">
+        <h2>Registrazione</h2>
+        <p class="muted" style="margin:0 0 22px">Ogni persona si registra con la propria email aziendale, che sarà anche il nome utente.</p>
+        <div class="row">
+          <label class="field"><span>Nome</span><input name="first_name" required autocomplete="given-name" maxlength="60"></label>
+          <label class="field"><span>Cognome</span><input name="last_name" required autocomplete="family-name" maxlength="60"></label>
+        </div>
+        <label class="field"><span>Azienda</span><input name="company" required autocomplete="organization" maxlength="120" placeholder="Ragione sociale"><small>Se la tua azienda è già registrata verrai aggiunto ai colleghi.</small></label>
+        <label class="field"><span>Email</span><input type="email" name="email" required autocomplete="email" maxlength="200" placeholder="nome@azienda.it"></label>
+        <label class="check" style="padding-top:2px"><input type="checkbox" name="privacy"><span><small>Acconsento al trattamento dei miei dati personali per la gestione delle prenotazioni (Reg. UE 2016/679).</small></span></label>
+        <div class="form-error" id="reg-err"></div>
+        <button class="btn btn-accent" style="width:100%;height:46px;margin-top:10px">Registrati</button>
+        <p class="muted small" style="margin-top:18px;text-align:center">Hai già un account? <a href="index.html">Accedi</a></p>
+      </form>
+      <div id="reg-ok" class="hidden" style="max-width:420px;width:100%">
+        <div class="card card-pad" style="padding:36px;text-align:center">
+          <div class="big-icon">✉️</div>
+          <h2 style="font-family:var(--serif);color:var(--primary-600);font-size:34px;margin:6px 0 10px">Controlla la tua email</h2>
+          <p class="muted">Abbiamo inviato un link di conferma a<br><b id="reg-email" style="color:var(--text)"></b></p>
+          <p class="muted small">Apri l'email e clicca su <b>Conferma iscrizione</b>: riceverai subito dopo la password per accedere. Se non la trovi, controlla nella cartella spam.</p>
+          <a class="btn btn-ghost" href="index.html" style="margin-top:10px">Torna all'accesso</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="common.js"></script>
+  <script>
+    api('/api/public-info').then((i) => {
+      if (!i.registration_enabled) {
+        $('#reg-form').innerHTML = '<h2>Registrazione non attiva</h2><p class="muted">Le iscrizioni online sono chiuse: contatta l\'amministrazione dello stabile per ricevere le credenziali.</p><a class="btn btn-primary" href="index.html">Torna all\'accesso</a>';
+      }
+    }).catch(() => {});
+    $('#reg-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target; const err = $('#reg-err'); err.textContent = '';
+      const d = Object.fromEntries(new FormData(f)); d.privacy = f.privacy.checked;
+      if (!d.first_name.trim() || !d.last_name.trim()) return (err.textContent = 'Inserisci nome e cognome');
+      if (!d.company.trim()) return (err.textContent = "Inserisci il nome dell'azienda");
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(d.email.trim())) return (err.textContent = 'Inserisci un indirizzo email valido');
+      if (!d.privacy) return (err.textContent = 'Per registrarti devi acconsentire al trattamento dei dati');
+      const btn = $('button', f); btn.disabled = true; btn.textContent = 'Invio in corso…';
+      try {
+        const r = await api('/api/register', { method: 'POST', body: d });
+        $('#reg-email').textContent = r.email; f.classList.add('hidden'); $('#reg-ok').classList.remove('hidden');
+      } catch (x) { err.textContent = x.message; btn.disabled = false; btn.textContent = 'Registrati'; }
+    };
+  </script>
+</body>
+</html>

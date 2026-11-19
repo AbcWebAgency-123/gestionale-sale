@@ -39,6 +39,7 @@ function render() {
   if (st.lobby) return renderLobby(n);
   const s = st.status;
   const room = st.room;
+  if (room.kind === 'palestra') return renderGym(n);
   let sub = '';
   if (s === 'libera') sub = st.next ? `Libera fino alle ${st.next.start}` : `Libera per il resto della giornata`;
   if (s === 'in_arrivo') sub = `Prossima riunione ${minutesTo(st.next.start, n)}`;
@@ -112,9 +113,50 @@ function render() {
   bindActions();
 }
 
+function renderGym(n) {
+  const room = st.room; const cur = st.current_all || [];
+  const hh = (m) => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  const G = { M: 'Uomo', F: 'Donna' };
+  let cls = 'libera'; let word = 'Libera'; let sub = st.next ? `Prossimo ingresso alle ${st.next.start}` : 'Nessun ingresso previsto oggi';
+  if (!st.open) { cls = 'chiusa'; word = 'Chiusa'; sub = 'Oggi la palestra è chiusa'; }
+  else if (cur.length >= 2) { cls = 'occupata'; word = 'Completa'; sub = `Fino alle ${cur[0].end}`; }
+  else if (cur.length === 1) { cls = 'in_arrivo'; word = 'In uso'; sub = `${G[cur[0].gender] || ''} fino alle ${cur[0].end} · 1 posto libero`; }
+  else if (n.min < toMin(st.open_time) || n.min >= toMin(st.close_time)) { cls = 'fuori_orario'; word = 'Chiusa'; sub = `Prenotabile dalle ${st.open_time} alle ${st.close_time}`; }
+  const people = cur.length ? `<div class="meeting"><div class="m-label">In palestra adesso</div>${cur.map((c) => `<div class="m-title" style="font-size:3vh">${G[c.gender] || ''}${c.company ? ' · ' + esc(c.company) : ''} <span style="opacity:.7;font-weight:600">${c.start}–${c.end}</span></div>`).join('')}</div>` : '';
+  const toCheck = (st.today || []).filter((b) => !b.checked_in && n.min >= toMin(b.start) - 10 && n.min < toMin(b.end));
+  const actions = st.checkin_required && toCheck.length ? `<div class="actions">${toCheck.map((b) => `<button class="act primary" data-act="checkin" data-id="${b.id}">✓ Conferma presenza · ${G[b.gender] || ''} ${b.start}</button>`).join('')}</div>` : '';
+  const rows = [];
+  for (let t = Math.ceil(toMin(st.open_time) / 60) * 60; t + 60 <= toMin(st.close_time); t += 60) {
+    const at = (st.today || []).filter((b) => toMin(b.start) < t + 60 && toMin(b.end) > t);
+    if (t + 60 <= n.min && !at.length) continue;
+    const g = (x) => { const b = at.find((y) => y.gender === x); return b ? `<b>${G[x]}</b> ${esc(b.company || 'occupato')}` : `<span style="opacity:.6">${G[x]} libero</span>`; };
+    const cls = t + 60 <= n.min ? 'past' : t <= n.min ? 'now' : at.length ? '' : 'free';
+    rows.push(`<div class="ag ${cls}"><div class="t">${hh(t)}<small>${hh(t + 60)}</small></div><div class="w"><span style="font-size:1.8vh;opacity:1">${g('M')}</span><span style="font-size:1.8vh;opacity:1">${g('F')}</span></div></div>`);
+  }
+  root.innerHTML = `<div class="screen s-${cls}">
+    <section class="main">
+      <div class="room-label"><img class="logo" src="brand/logo-bianco.png" alt="CARDO Centro Uffici"></div>
+      <div class="room-name">🏋️ ${esc(room.name)}</div>
+      <div class="room-meta"><span>Massimo 1 uomo + 1 donna per ora</span>${room.location ? `<span>📍 ${esc(room.location)}</span>` : ''}</div>
+      <div class="status"><div class="status-word">${word}</div><div class="status-sub">${sub}</div>${people}${actions}
+        <div class="footer-hint">Prenota la palestra dal tuo ufficio: <b>${esc(location.host)}</b></div></div>
+    </section>
+    <aside class="side"><div class="clock" id="clock">${n.time}</div><div class="date">${dateLong(n.date)}</div>
+      <div class="agenda-title">Ingressi di oggi</div><div class="agenda">${st.open ? rows.slice(0, 7).join('') : '<div class="empty-day">Oggi la palestra è chiusa.</div>'}</div>
+      <div class="brand"><span>${esc(st.building_name)}</span><span>Aggiornato ${n.time}</span></div></aside>
+  </div>`;
+  bindActions();
+}
+
 function renderLobby(n) {
   const cards = st.rooms.map((r) => {
     const s = r.status;
+    if (r.room.kind === 'palestra') {
+      const c = (r.current_all || []).length;
+      const ws = !r.open ? 'chiusa' : c >= 2 ? 'occupata' : c === 1 ? 'in_arrivo' : s === 'fuori_orario' ? 'fuori_orario' : 'libera';
+      const wl = !r.open || ws === 'fuori_orario' ? 'Chiusa' : c >= 2 ? 'Completa' : c === 1 ? 'In uso' : 'Libera';
+      return `<div class="lc s-${ws}"><h2>🏋️ ${esc(r.room.name)}</h2><div class="lm">1 uomo + 1 donna per ora</div><div class="lst">${wl}</div><div class="lsub">${c === 1 ? '1 posto libero' : c >= 2 ? 'fino alle ' + r.current_all[0].end : ''}</div><div class="lnext">${r.next ? 'Prossimo ingresso: ' + r.next.start : 'Nessun altro ingresso oggi'}</div></div>`;
+    }
     const sub = s === 'occupata' ? `fino alle ${r.current.end}` : s === 'in_arrivo' ? `riunione ${minutesTo(r.next.start, n)}` : s === 'libera' ? (r.next ? `fino alle ${r.next.start}` : 'per il resto della giornata') : '';
     const nxt = r.current ? (r.next ? `Dopo: ${r.next.start} ${esc(r.next.title)}` : 'Poi libera') : (r.next ? `Prossima: ${r.next.start}–${r.next.end} ${esc(r.next.company || r.next.title)}` : 'Nessun\'altra riunione oggi');
     return `<div class="lc s-${s}">

@@ -7,6 +7,9 @@ const SECTIONS = [
   ['aziende', 'Aziende', ic('<path d="M3 21h18M5 21V5a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v16M15 9h3a1 1 0 0 1 1 1v11M8 8h3M8 12h3M8 16h3"/>')],
   ['utenti', 'Utenti', ic('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.3-5.5 6.5-5.5s5.9 1.9 6.5 5.5M16 4.5a3.5 3.5 0 0 1 0 7M18.5 14.8c1.7.8 2.8 2.5 3 5.2"/>')],
   ['sale', 'Sale e display', ic('<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>')],
+  ['palestra', 'Palestra e moduli', ic('<path d="M6 7v10M18 7v10M3 10v4M21 10v4M6 12h12"/>')],
+  ['penali', 'Penali', ic('<path d="M12 3v18M17 7.5c0-1.9-2.2-3-5-3s-5 1.1-5 3 2.2 2.6 5 3.5 5 1.6 5 3.5-2.2 3-5 3-5-1.1-5-3"/>')],
+  ['email', 'Email inviate', ic('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>')],
   ['chiusure', 'Chiusure e festività', ic('<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>')],
   ['impostazioni', 'Regole e impostazioni', ic('<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>')],
   ['registro', 'Registro attività', ic('<path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/>')],
@@ -23,11 +26,49 @@ async function init() {
   $$('#side-nav button').forEach((b) => (b.onclick = () => { location.hash = b.dataset.s; }));
   window.addEventListener('hashchange', show);
   show();
+  updateBadges();
+  liveUpdates('/api/events', () => { updateBadges(); if ((location.hash || '#panoramica') === '#panoramica') drawLive(); });
+}
+async function updateBadges() {
+  try {
+    const l = await api('/api/admin/live');
+    for (const [k, n] of [['palestra', l.pending_waivers], ['penali', l.open_penalties]]) {
+      const b = $(`#side-nav button[data-s="${k}"]`); if (!b) continue;
+      b.querySelector('.badge-count')?.remove();
+      if (n) b.insertAdjacentHTML('beforeend', `<span class="badge-count">${n}</span>`);
+    }
+  } catch { /* */ }
+}
+/* stato delle sale in tempo reale */
+let liveTimer = null;
+const stopLive = () => { clearInterval(liveTimer); liveTimer = null; };
+const WORD = { libera: 'Libera', occupata: 'Occupata', in_arrivo: 'In arrivo', chiusa: 'Chiusa', fuori_orario: 'Chiusa' };
+async function drawLive() {
+  const box = $('#live'); if (!box) return;
+  let l; try { l = await api('/api/admin/live'); } catch { return; }
+  const n = l.now;
+  const counts = { libera: 0, occupata: 0, in_arrivo: 0 };
+  box.innerHTML = l.rooms.map((r) => {
+    const st = r.room.kind === 'palestra' && r.current_all.length === 1 && r.status === 'occupata' ? 'in_arrivo' : r.status;
+    counts[r.status] = (counts[r.status] || 0) + 1;
+    let sub = ''; let bar = '';
+    if (r.room.kind === 'palestra') {
+      sub = r.current_all.length ? r.current_all.map((c) => `${c.gender === 'F' ? 'Donna' : 'Uomo'}${c.company ? ' · ' + esc(c.company) : ''}`).join(' / ') : (r.next ? `Prossimo ingresso ${r.next.start}` : 'Nessun ingresso previsto');
+    } else if (r.current) {
+      const pct = Math.min(100, ((n.min - toMin(r.current.start)) / (toMin(r.current.end) - toMin(r.current.start))) * 100);
+      sub = `${esc(r.current.company || r.current.title)} · fino alle ${r.current.end}`; bar = `<div class="bar"><div style="width:${pct}%"></div></div>`;
+    } else sub = r.status === 'in_arrivo' ? `Riunione alle ${r.next.start}` : r.next ? `Libera fino alle ${r.next.start}` : r.open ? 'Libera per il resto del giorno' : '';
+    const word = r.room.kind === 'palestra' && r.status === 'occupata' ? (r.current_all.length >= 2 ? 'Completa' : 'In uso') : WORD[r.status];
+    return `<div class="live-card s-${st}"><h4>${r.room.kind === 'palestra' ? '🏋️ ' : ''}${esc(r.room.name)}</h4><div class="lm">${esc(r.room.location || '')}${r.today.length ? ` · ${r.today.length} prenotazioni oggi` : ''}</div>
+      <div class="lst">${word}</div><div class="lsub">${sub}</div>${bar}</div>`;
+  }).join('');
+  $('#live-sum').innerHTML = `<span class="chip"><i style="background:#19a383"></i>${counts.libera} libere</span><span class="chip"><i style="background:#a7406b"></i>${counts.occupata} occupate</span><span class="chip"><i style="background:#b9771f"></i>${counts.in_arrivo} in arrivo</span><span class="chip">Aggiornato ${n.time}</span>`;
 }
 function show() {
   const s = (location.hash || '#panoramica').slice(1);
   $$('#side-nav button').forEach((b) => b.classList.toggle('active', b.dataset.s === s));
-  ({ panoramica, prenotazioni, aziende, utenti, sale, chiusure, impostazioni, registro }[s] || panoramica)();
+  stopLive();
+  ({ panoramica, prenotazioni, aziende, utenti, sale, palestra, penali, email, chiusure, impostazioni, registro }[s] || panoramica)();
 }
 const C = () => $('#content');
 const head = (title, sub, right = '') => `<div class="page-head"><div><h1>${title}</h1>${sub ? `<p class="muted" style="margin:4px 0 0">${sub}</p>` : ''}</div><div class="spacer"></div>${right}</div>`;
@@ -45,10 +86,12 @@ async function panoramica(month = thisMonth()) {
     `<input type="month" id="m" value="${month}" style="width:170px">
      <a class="btn btn-ghost" href="/api/admin/export.csv?month=${month}">Esporta CSV</a>
      <a class="btn btn-ghost" href="/api/admin/backup" title="Scarica una copia completa del database">Backup dati</a>`) + `
+    <div class="live-head"><span class="live-dot"></span><h3>Le sale adesso</h3><div class="live-summary" id="live-sum"></div></div>
+    <div class="live-grid" id="live"></div>
     <div class="kpis">
       <div class="card kpi"><small>Prenotazioni</small><b>${r.bookings}</b><span>nel mese</span></div>
       <div class="card kpi"><small>Ore prenotate</small><b>${fmtHours(totH)}</b><span>su ${fmtHours(r.hours_available_per_room * r.rooms.length)} disponibili</span></div>
-      <div class="card kpi"><small>Occupazione media</small><b>${avgOcc.toFixed(0)}%</b><span>delle 5 sale</span></div>
+      <div class="card kpi"><small>Occupazione media</small><b>${avgOcc.toFixed(0)}%</b><span>delle ${r.rooms.length} sale</span></div>
       <div class="card kpi"><small>Aziende che hanno prenotato</small><b>${r.companies.length}</b><span>${noShow ? `${noShow} sale liberate per mancato check-in` : 'nessun mancato check-in'}</span></div>
     </div>
     <div class="settings-grid">
@@ -62,6 +105,7 @@ async function panoramica(month = thisMonth()) {
     ${r.companies.length > 10 ? `<div class="card" style="margin-top:20px"><div class="card-head"><h3>Tutte le aziende</h3></div><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Azienda</th><th class="num">Ore</th><th class="num">Prenotazioni</th><th class="num">Mancati check-in</th></tr></thead><tbody>
       ${r.companies.map((x) => `<tr><td>${esc(x.company)}</td><td class="num">${fmtHours(x.hours)}</td><td class="num">${x.bookings}</td><td class="num">${x.no_show || ''}</td></tr>`).join('')}</tbody></table></div></div>` : ''}`;
   $('#m').onchange = (e) => panoramica(e.target.value);
+  drawLive(); stopLive(); liveTimer = setInterval(drawLive, 30000);
 }
 
 /* ------------------------------------------------------------ prenotazioni */
@@ -109,7 +153,7 @@ async function aziende() {
     $('#body').innerHTML = rows.filter((c) => (inact || c.active) && `${c.name} ${c.location} ${c.contact_name} ${c.contact_email}`.toLowerCase().includes(q)).map((c) => `
       <tr class="${c.active ? '' : 'inactive'}"><td><b>${esc(c.name)}</b>${c.active ? '' : ' <span class="tag">disattivata</span>'}</td><td>${esc(c.location)}</td>
       <td>${esc(c.contact_name)}<br><span class="muted small">${esc(c.contact_email)} ${esc(c.contact_phone)}</span></td>
-      <td class="num">${c.users_count}</td><td class="num">${fmtHours(c.hours_this_month)}</td><td class="num">${c.monthly_quota_hours != null ? fmtHours(c.monthly_quota_hours) : '<span class="muted">illimitato</span>'}</td>
+      <td class="num">${c.users_count}</td><td class="num">${fmtHours(c.hours_this_month)}</td><td class="num">${c.monthly_quota_hours != null ? fmtHours(c.monthly_quota_hours) : c.quota_effective != null ? `<span class="muted" title="Valore predefinito">${fmtHours(c.quota_effective)}</span>` : '<span class="muted">illimitato</span>'}</td>
       <td class="actions"><button class="btn btn-ghost btn-sm" data-edit="${c.id}">Modifica</button></td></tr>`).join('') || '<tr><td colspan="7" class="empty">Nessuna azienda. Aggiungine una o importale da CSV.</td></tr>';
     $$('[data-edit]').forEach((b) => (b.onclick = () => companyModal(rows.find((c) => c.id === +b.dataset.edit))));
   };
@@ -125,7 +169,7 @@ function companyModal(c) {
       <label class="field"><span>Ubicazione nello stabile</span><input name="location" placeholder="Es. Piano 3, interno 12" value="${esc(c.location)}"></label>
       <div class="row"><label class="field"><span>Referente</span><input name="contact_name" value="${esc(c.contact_name)}"></label><label class="field"><span>Telefono</span><input name="contact_phone" value="${esc(c.contact_phone)}"></label></div>
       <label class="field"><span>Email referente</span><input type="email" name="contact_email" value="${esc(c.contact_email)}"></label>
-      <label class="field"><span>Monte ore mensile</span><input type="number" step="0.5" min="0" name="monthly_quota_hours" value="${c.monthly_quota_hours ?? ''}" placeholder="Vuoto = illimitato"><small>Numero massimo di ore di sala prenotabili ogni mese (utile se le sale sono incluse nel contratto con un limite).</small></label>
+      <label class="field"><span>Monte ore mensile</span><input type="number" step="0.5" min="0" name="monthly_quota_hours" value="${c.monthly_quota_hours ?? ''}" placeholder="Vuoto = valore predefinito"><small>Ore di sala riunioni prenotabili ogni mese. Lascia vuoto per usare il valore predefinito (Regole e impostazioni); la palestra non conta.</small></label>
       <label class="check"><input type="checkbox" name="active" ${c.active ? 'checked' : ''}><span><b>Azienda attiva</b><small>Se disattivata, i suoi utenti non possono accedere e le prenotazioni future vengono annullate.</small></span></label>
       <div class="form-error" id="err"></div>
     </form>
@@ -188,10 +232,11 @@ async function utenti() {
   const draw = () => {
     const q = $('#q').value.toLowerCase(); const fc = $('#fc').value; const inact = $('#show-inactive').checked;
     $('#body').innerHTML = rows.filter((u) => (inact || u.active) && (!fc || String(u.company_id) === fc) && `${u.name} ${u.email}`.toLowerCase().includes(q)).map((u) => `
-      <tr class="${u.active ? '' : 'inactive'}"><td><b>${esc(u.name)}</b>${u.must_change_password ? ' <span class="tag tag-amber" title="Non ha ancora cambiato la password iniziale">primo accesso</span>' : ''}</td><td>${esc(u.email)}</td><td>${esc(u.company_name || '—')}</td>
+      <tr class="${u.active ? '' : 'inactive'}"><td><b>${esc(u.name)}</b>${!u.email_verified ? ' <span class="tag tag-amber" title="Non ha ancora cliccato il link di conferma">da confermare</span>' : u.must_change_password ? ' <span class="tag tag-amber" title="Non ha ancora cambiato la password iniziale">primo accesso</span>' : ''}${u.self_registered ? ' <span class="tag" title="Si è registrato da solo">online</span>' : ''}${u.gym_waiver_status === 'approvato' ? ' <span class="tag tag-green">palestra</span>' : u.gym_waiver_status === 'in_attesa' ? ' <span class="tag tag-amber">modulo palestra</span>' : ''}</td><td>${esc(u.email)}</td><td>${esc(u.company_name || '—')}</td>
       <td><span class="role-pill role-${u.role}">${ROLE[u.role]}</span></td><td class="muted small">${u.last_login ? u.last_login.slice(0, 16).replace('T', ' ') : 'mai'}</td>
-      <td class="actions"><button class="btn btn-ghost btn-sm" data-reset="${u.id}">Reset password</button> <button class="btn btn-ghost btn-sm" data-edit="${u.id}">Modifica</button></td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessun utente</td></tr>';
+      <td class="actions">${!u.email_verified ? `<button class="btn btn-ghost btn-sm" data-resend="${u.id}">Reinvia conferma</button> ` : ''}<button class="btn btn-ghost btn-sm" data-reset="${u.id}">Reset password</button> <button class="btn btn-ghost btn-sm" data-edit="${u.id}">Modifica</button></td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessun utente</td></tr>';
     $$('[data-edit]').forEach((b) => (b.onclick = () => userModal(rows.find((u) => u.id === +b.dataset.edit), companies)));
+    $$('[data-resend]').forEach((b) => (b.onclick = async () => { try { await api(`/api/admin/users/${b.dataset.resend}/resend-confirmation`, { method: 'POST', body: {} }); toast('Email di conferma inviata di nuovo'); } catch (e) { toast(e.message, 'err'); } }));
     $$('[data-reset]').forEach((b) => (b.onclick = async () => {
       const u = rows.find((x) => x.id === +b.dataset.reset);
       if (!await confirmBox('Reimpostare la password?', `Verrà generata una nuova password temporanea per <b>${esc(u.name)}</b>.`, { okText: 'Genera password' })) return;
@@ -234,7 +279,7 @@ async function sale() {
   C().innerHTML = head('Sale e display', 'Configura le sale e i tablet posizionati accanto a ciascuna porta', '<button class="btn btn-primary" id="add">+ Nuova sala</button>') + `
     <div class="room-cards">${rooms.map((r) => `
       <div class="card room-card" style="border-top-color:${r.color}${r.active ? '' : ';opacity:.6'}">
-        <div style="display:flex;gap:10px;align-items:flex-start"><div style="flex:1"><h3>${esc(r.name)} ${r.active ? '' : '<span class="tag">non attiva</span>'}</h3><p class="muted small" style="margin:0">${r.capacity} posti${r.location ? ' · ' + esc(r.location) : ''}</p></div><button class="btn btn-ghost btn-sm" data-edit="${r.id}">Modifica</button></div>
+        <div style="display:flex;gap:10px;align-items:flex-start"><div style="flex:1"><h3>${esc(r.name)} ${r.active ? '' : '<span class="tag">non attiva</span>'}</h3><p class="muted small" style="margin:0">${r.kind === 'palestra' ? '🏋️ Palestra · max ' + r.capacity + ' persone per ora' : r.capacity + ' posti'}${r.location ? ' · ' + esc(r.location) : ''}</p></div><button class="btn btn-ghost btn-sm" data-edit="${r.id}">Modifica</button></div>
         <p class="small" style="margin:10px 0 0;color:var(--text-2)">${esc(r.equipment) || '<span class="muted">Nessuna dotazione indicata</span>'}</p>
         <div class="small" style="margin-top:14px;font-weight:600">Link del display</div>
         <div class="link-box"><input readonly value="${link(r.display_token)}"><button class="btn btn-ghost btn-sm" data-copy="${link(r.display_token)}">Copia</button><a class="btn btn-ghost btn-sm" target="_blank" href="${link(r.display_token)}">Apri</a></div>
@@ -263,6 +308,7 @@ function roomModal(r) {
     <div class="modal-head"><h3>${r.id ? 'Modifica sala' : 'Nuova sala'}</h3><button class="icon-btn" data-close>✕</button></div>
     <form class="modal-body" id="f">
       <div class="row"><label class="field"><span>Nome</span><input name="name" required value="${esc(r.name)}"></label><label class="field"><span>Capienza (persone)</span><input type="number" min="1" name="capacity" required value="${r.capacity}"></label></div>
+      <label class="field"><span>Tipo</span><select name="kind"><option value="sala" ${r.kind !== 'palestra' ? 'selected' : ''}>Sala riunioni</option><option value="palestra" ${r.kind === 'palestra' ? 'selected' : ''}>Palestra (prenotazione a persona, un'ora alla volta)</option></select><small>Per la palestra la capienza è il numero massimo di persone per ora (massimo 2).</small></label>
       <label class="field"><span>Ubicazione</span><input name="location" value="${esc(r.location)}" placeholder="Es. Primo piano, lato ascensori"></label>
       <label class="field"><span>Dotazioni</span><input name="equipment" value="${esc(r.equipment)}" placeholder="Es. Schermo 65&quot;, videoconferenza, lavagna"></label>
       <div class="row"><label class="field"><span>Colore</span><input type="color" name="color" value="${r.color}"></label><label class="field"><span>Ordine di visualizzazione</span><input type="number" name="sort_order" value="${r.sort_order}"></label></div>
@@ -319,10 +365,23 @@ async function impostazioni() {
         <label class="field"><span>Anticipo massimo (giorni)</span><input type="number" min="1" name="max_advance_days" value="${s.max_advance_days}"></label></div>
         <div class="row"><label class="field"><span>Prenotazioni attive per azienda</span><input type="number" min="0" name="max_active_per_company" value="${s.max_active_per_company}"><small>0 = nessun limite</small></label>
         <label class="field"><span>Ripetizioni settimanali max</span><input type="number" min="0" max="52" name="max_repeat_weeks" value="${s.max_repeat_weeks}"></label></div>
-        <p class="muted small">Il monte ore mensile si imposta per singola azienda nella sezione Aziende.</p>
+        <label class="field"><span>Monte ore mensile predefinito per azienda</span><input type="number" step="0.5" min="0" name="default_monthly_quota_hours" value="${esc(s.default_monthly_quota_hours)}" placeholder="Vuoto = illimitato"><small>Ore di sala riunioni al mese; superata la soglia l'azienda non può più prenotare. Si può personalizzare per singola azienda. La palestra non conta.</small></label>
+      </div></div>
+      <div class="card"><div class="card-head"><h3>Penali e promemoria</h3></div><div class="card-pad">
+        ${chk('penalties_enabled', 'Applica le penali', 'Per chi non si presenta (nessuna conferma al tablet) o annulla senza il preavviso richiesto.')}
+        <div class="row"><label class="field"><span>Importo penale (€)</span><input type="number" step="0.5" min="0" name="penalty_amount" value="${esc(s.penalty_amount)}"></label>
+        <label class="field"><span>Preavviso minimo (ore)</span><input type="number" min="0" max="168" name="cancel_notice_hours" value="${esc(s.cancel_notice_hours)}"></label></div>
+        ${chk('reminders_enabled', 'Invia il promemoria 24 ore prima', "Email automatica a chi ha prenotato, con il link per annullare.")}
+        <p class="muted small">Le penali vengono solo registrate: le trovi in Penali, da esportare per l'addebito.</p>
+      </div></div>
+      <div class="card"><div class="card-head"><h3>Registrazione e palestra</h3></div><div class="card-pad">
+        ${chk('registration_enabled', 'Le aziende possono registrarsi da sole', "Pagina pubblica di iscrizione con conferma via email. Il primo iscritto di un'azienda diventa referente.")}
+        <label class="field"><span>Avvisa di ogni nuova iscrizione (facoltativo)</span><input type="email" name="admin_notify_email" value="${esc(s.admin_notify_email)}" placeholder="es. info@ufficicardo.com"></label>
+        <label class="field"><span>Email che riceve i moduli della palestra</span><input type="email" name="gym_waiver_email" value="${esc(s.gym_waiver_email)}" required></label>
+        <label class="field"><span>Regola di accesso alla palestra</span><select name="gym_rule">${[['uno_per_sesso', 'Massimo 1 uomo + 1 donna per ora'], ['stesso_sesso', 'Massimo 2 persone dello stesso sesso per ora'], ['misto', 'Fino alla capienza, senza distinzione']].map(([v, l]) => `<option value="${v}" ${s.gym_rule === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div></div>
       <div class="card"><div class="card-head"><h3>Check-in al display</h3></div><div class="card-pad">
-        ${chk('checkin_required', 'Richiedi conferma di presenza', 'Chi ha prenotato deve toccare “Conferma presenza” sul tablet della sala. Se nessuno lo fa, la sala torna libera automaticamente (riduce le prenotazioni “fantasma”).')}
+        ${chk('checkin_required', 'Richiedi conferma di presenza', 'Chi ha prenotato deve toccare “Conferma presenza” sul tablet della sala. Se nessuno lo fa, la sala torna libera e si applica la penale per mancato utilizzo.')}
         <label class="field"><span>Tempo massimo per il check-in (minuti dall'inizio)</span><input type="number" min="5" max="60" name="checkin_grace_minutes" value="${s.checkin_grace_minutes}"></label>
       </div></div>
       <div class="card"><div class="card-head"><h3>Privacy</h3></div><div class="card-pad">
@@ -335,16 +394,104 @@ async function impostazioni() {
   $('#f').onsubmit = async (e) => {
     e.preventDefault();
     const d = Object.fromEntries(new FormData(e.target));
-    for (const k of ['checkin_required', 'show_titles_to_others', 'display_show_title', 'display_show_company']) d[k] = d[k] ? '1' : '0';
+    for (const k of ['checkin_required', 'show_titles_to_others', 'display_show_title', 'display_show_company', 'penalties_enabled', 'reminders_enabled', 'registration_enabled']) d[k] = d[k] ? '1' : '0';
     try { await api('/api/admin/settings', { method: 'PUT', body: d }); CFG = await api('/api/config'); toast('Impostazioni salvate'); }
     catch (err) { toast(err.message, 'err'); }
   };
 }
 
+/* ------------------------------------------------------------ palestra */
+async function palestra() {
+  const [rows, settings] = await Promise.all([api('/api/admin/waivers'), api('/api/admin/settings')]);
+  const ST = { in_attesa: ['tag-amber', 'Da verificare'], approvato: ['tag-green', 'Approvato'], rifiutato: ['tag-red', 'Rifiutato'] };
+  const pending = rows.filter((r) => r.status === 'in_attesa');
+  C().innerHTML = head('Palestra e moduli', `Moduli di responsabilità caricati dagli utenti · ${pending.length} da verificare`) + `
+    <div class="settings-grid" style="margin-bottom:20px">
+      <div class="card card-pad"><h3 style="font-family:var(--serif);font-size:20px;color:var(--primary-600);margin:0 0 6px">Come funziona</h3>
+        <ol class="rules"><li>L'utente scarica il modulo, lo firma e lo carica in piattaforma.</li><li>Il file arriva via email a <b>${esc(settings.gym_waiver_email)}</b> e compare qui sotto.</li><li>Verifica il modulo e approvalo: l'utente riceve un'email e può prenotare.</li></ol></div>
+      <div class="card card-pad"><h3 style="font-family:var(--serif);font-size:20px;color:var(--primary-600);margin:0 0 6px">Modello del modulo</h3>
+        <p class="muted small" style="margin:0 0 10px">${settings.gym_template_custom ? 'Stai usando un modello personalizzato.' : 'Stai usando il modello standard CARDO: fallo verificare al vostro legale o sostituiscilo con il vostro.'}</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn btn-ghost btn-sm" href="/api/gym/template" target="_blank">Scarica il modello</a>
+        <label class="btn btn-ghost btn-sm">Carica il vostro PDF<input type="file" accept="application/pdf,.pdf" id="tpl" hidden></label>
+        ${settings.gym_template_custom ? '<button class="btn btn-ghost btn-sm" id="tpl-reset">Ripristina standard</button>' : ''}</div></div>
+    </div>
+    <div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Utente</th><th>Azienda</th><th>Accesso</th><th>Caricato il</th><th>Stato</th><th></th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td><b>${esc(r.name)}</b><br><span class="muted small">${esc(r.email)}</span></td><td>${esc(r.company_name || '—')}</td><td>${r.gender === 'F' ? 'Donna' : r.gender === 'M' ? 'Uomo' : '—'}</td>
+      <td class="small">${esc((r.uploaded_at || '').slice(0, 16))}</td><td><span class="tag ${ST[r.status]?.[0] || ''}">${ST[r.status]?.[1] || r.status}</span>${r.note ? `<br><span class="muted small">${esc(r.note)}</span>` : ''}</td>
+      <td class="actions"><a class="btn btn-ghost btn-sm" href="/api/admin/waivers/${r.id}/file" target="_blank">Apri modulo</a>
+      ${r.status !== 'approvato' ? `<button class="btn btn-primary btn-sm" data-ok="${r.id}">Approva</button>` : ''} ${r.status !== 'rifiutato' ? `<button class="btn btn-danger-ghost btn-sm" data-ko="${r.id}">Rifiuta</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessun modulo caricato</td></tr>'}
+    </tbody></table></div></div>`;
+  const decide = async (id, decision) => {
+    let note = '';
+    if (decision === 'rifiutato') {
+      const r = await confirmBox('Rifiutare il modulo?', "L'utente riceverà un'email e dovrà caricarne uno nuovo.", { okText: 'Rifiuta', danger: true, extra: '<label class="field" style="margin-top:12px"><span>Motivo (facoltativo, visibile all\'utente)</span><input name="note" placeholder="Es. manca la firma per i punti 5 e 6"></label>' });
+      if (!r) return; note = r.note || '';
+    }
+    try { await api(`/api/admin/waivers/${id}`, { method: 'POST', body: { decision, note } }); toast(decision === 'approvato' ? "Modulo approvato: l'utente è stato avvisato" : 'Modulo rifiutato'); palestra(); updateBadges(); }
+    catch (e) { toast(e.message, 'err'); }
+  };
+  $$('[data-ok]').forEach((b) => (b.onclick = () => decide(b.dataset.ok, 'approvato')));
+  $$('[data-ko]').forEach((b) => (b.onclick = () => decide(b.dataset.ko, 'rifiutato')));
+  $('#tpl').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const data = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.readAsDataURL(f); });
+    try { await api('/api/admin/gym-template', { method: 'POST', body: { data } }); toast('Modello aggiornato'); palestra(); } catch (x) { toast(x.message, 'err'); }
+  };
+  $('#tpl-reset')?.addEventListener('click', async () => { await api('/api/admin/gym-template', { method: 'DELETE' }); toast('Ripristinato il modello standard'); palestra(); });
+}
+
+/* ------------------------------------------------------------ penali */
+async function penali(filter = 'da_addebitare') {
+  const rows = await api(`/api/admin/penalties${filter ? `?status=${filter}` : ''}`);
+  const tot = rows.reduce((t, p) => t + p.amount, 0);
+  const ST = { da_addebitare: ['tag-amber', 'Da addebitare'], addebitata: ['tag-green', 'Addebitata'], annullata: ['', 'Annullata'] };
+  const eur = (n) => `${n.toFixed(2).replace('.', ',')} €`;
+  C().innerHTML = head('Penali', 'Mancati utilizzi e annullamenti senza preavviso', '<a class="btn btn-ghost" href="/api/admin/penalties.csv">Esporta CSV</a>') + `
+    <div class="card"><div class="toolbar"><div class="seg" id="pf">${[['da_addebitare', 'Da addebitare'], ['addebitata', 'Addebitate'], ['annullata', 'Annullate'], ['', 'Tutte']].map(([v, l]) => `<button data-v="${v}" class="${filter === v ? 'active' : ''}">${l}</button>`).join('')}</div>
+      <div class="spacer"></div><span class="muted small">${rows.length} penali · totale <b>${eur(tot)}</b></span></div>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Data</th><th>Sala</th><th>Azienda</th><th>Utente</th><th>Motivo</th><th class="num">Importo</th><th>Stato</th><th></th></tr></thead><tbody>
+    ${rows.map((p) => `<tr><td>${p.date ? fmtDateShort(p.date) + ' ' + p.start : '—'}</td><td>${esc(p.room_name || '')}</td><td>${esc(p.company_name || '')}</td><td>${esc(p.user_name || '')}</td>
+      <td>${p.reason === 'cancellazione_tardiva' ? 'Annullamento tardivo' : 'Mancato utilizzo'}${p.note ? `<br><span class="muted small">${esc(p.note)}</span>` : ''}</td><td class="num">${eur(p.amount)}</td><td><span class="tag ${ST[p.status][0]}">${ST[p.status][1]}</span></td>
+      <td class="actions">${p.status !== 'addebitata' ? `<button class="btn btn-ghost btn-sm" data-st="addebitata" data-id="${p.id}">Segna addebitata</button>` : ''} ${p.status !== 'annullata' ? `<button class="btn btn-ghost btn-sm" data-st="annullata" data-id="${p.id}">Annulla</button>` : `<button class="btn btn-ghost btn-sm" data-st="da_addebitare" data-id="${p.id}">Ripristina</button>`}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Nessuna penale</td></tr>'}
+    </tbody></table></div></div>`;
+  $$('#pf button').forEach((b) => (b.onclick = () => penali(b.dataset.v)));
+  $$('[data-st]').forEach((b) => (b.onclick = async () => {
+    let note = '';
+    if (b.dataset.st === 'annullata') { const r = await confirmBox('Annullare la penale?', 'La penale non verrà addebitata.', { okText: 'Annulla penale', extra: '<label class="field" style="margin-top:12px"><span>Motivo (facoltativo)</span><input name="note" placeholder="Es. tablet guasto, riunione spostata dall\'amministrazione"></label>' }); if (!r) return; note = r.note || ''; }
+    await api(`/api/admin/penalties/${b.dataset.id}`, { method: 'PUT', body: { status: b.dataset.st, note } }); toast('Penale aggiornata'); penali(filter); updateBadges();
+  }));
+}
+
+/* ------------------------------------------------------------ email */
+async function email() {
+  const o = await api('/api/admin/outbox');
+  const ST = { inviata: ['tag-green', 'Inviata'], in_coda: ['tag-amber', 'In coda'], errore: ['tag-red', 'Errore'] };
+  const KIND = { confirmRegistration: 'Conferma iscrizione', welcome: 'Credenziali', bookingConfirmed: 'Conferma prenotazione', reminder: 'Promemoria 24h', penalty: 'Penale', waiverToOffice: 'Modulo palestra', waiverDecision: 'Esito modulo', passwordReset: 'Recupero password', newPassword: 'Nuova password', adminNewUser: 'Nuova iscrizione', test: 'Prova' };
+  C().innerHTML = head('Email inviate', 'Tutte le email automatiche del gestionale', '<button class="btn btn-primary" id="test">Invia email di prova</button>') + `
+    ${o.configured ? `<div class="mail-status ok">✓ Invio email attivo${o.from ? ' · mittente ' + esc(o.from) : ''}</div>`
+      : `<div class="mail-status ko">⚠ L'invio email non è ancora configurato: le email restano in coda e partiranno appena imposti le variabili SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS e SMTP_FROM sul server. Nel frattempo puoi aprirle qui sotto (ad esempio per inoltrare a mano un link di conferma).</div>`}
+    <div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Creata</th><th>Destinatario</th><th>Tipo</th><th>Oggetto</th><th>Stato</th><th></th></tr></thead><tbody>
+    ${o.rows.map((m) => `<tr><td class="small" style="white-space:nowrap">${esc(m.created_at.slice(0, 16))}</td><td>${esc(m.to_addr)}</td><td class="small">${KIND[m.kind] || esc(m.kind)}</td><td>${esc(m.subject)}</td>
+      <td><span class="tag ${ST[m.status]?.[0] || ''}" title="${esc(m.last_error || '')}">${ST[m.status]?.[1] || m.status}</span>${m.last_error ? `<br><span class="muted small">${esc(m.last_error.slice(0, 80))}</span>` : ''}</td>
+      <td class="actions"><button class="btn btn-ghost btn-sm" data-view="${m.id}">Apri</button>${m.status !== 'inviata' ? ` <button class="btn btn-ghost btn-sm" data-retry="${m.id}">Riprova</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessuna email</td></tr>'}
+    </tbody></table></div></div>`;
+  $('#test').onclick = async () => {
+    const r = await confirmBox('Email di prova', 'Invia un messaggio di prova per verificare la configurazione.', { okText: 'Invia', extra: `<label class="field" style="margin-top:12px"><span>Destinatario</span><input name="to" value="${esc(ME.email.includes('@sale.local') ? '' : ME.email)}" placeholder="nome@dominio.it"></label>` });
+    if (!r) return;
+    try { const x = await api('/api/admin/test-email', { method: 'POST', body: { to: r.to } }); toast(x.configured ? 'Email di prova messa in invio' : 'Email in coda: configura SMTP per inviarla', x.configured ? 'ok' : 'warn'); setTimeout(email, 1500); } catch (e) { toast(e.message, 'err'); }
+  };
+  $$('[data-retry]').forEach((b) => (b.onclick = async () => { await api(`/api/admin/outbox/${b.dataset.retry}/retry`, { method: 'POST', body: {} }); toast('Nuovo tentativo avviato'); setTimeout(email, 1500); }));
+  $$('[data-view]').forEach((b) => (b.onclick = async () => {
+    const m = await api(`/api/admin/outbox/${b.dataset.view}`);
+    const md = openModal(`<div class="modal-head"><h3>${esc(m.subject)}</h3><button class="icon-btn" data-close>✕</button></div><div class="modal-body" style="padding:0"><p class="muted small" style="padding:12px 22px 0;margin:0">A: ${esc(m.to_addr)}</p><iframe sandbox="" style="width:100%;height:60vh;border:0"></iframe></div>`, { wide: true });
+    md.el.querySelector('iframe').srcdoc = m.html;
+  }));
+}
+
 /* ------------------------------------------------------------ registro */
 async function registro() {
   const rows = await api('/api/admin/audit');
-  const L = { prenotazione_creata: 'Prenotazione creata', prenotazione_modificata: 'Prenotazione modificata', prenotazione_cancellata: 'Prenotazione annullata', auto_rilascio: 'Sala liberata (no check-in)', checkin_display: 'Check-in dal display', termina_display: 'Riunione terminata dal display', cambio_password: 'Cambio password', import_csv: 'Importazione CSV' };
+  const L = { registrazione: 'Nuova registrazione', iscrizione_confermata: 'Iscrizione confermata', penale: 'Penale registrata', modulo_palestra_caricato: 'Modulo palestra caricato', modulo_palestra_approvato: 'Modulo palestra approvato', modulo_palestra_rifiutato: 'Modulo palestra rifiutato', prenotazione_creata: 'Prenotazione creata', prenotazione_modificata: 'Prenotazione modificata', prenotazione_cancellata: 'Prenotazione annullata', auto_rilascio: 'Sala liberata (no check-in)', checkin_display: 'Check-in dal display', termina_display: 'Riunione terminata dal display', cambio_password: 'Cambio password', import_csv: 'Importazione CSV' };
   C().innerHTML = head('Registro attività', 'Ultime 300 operazioni, utile per chiarire contestazioni tra aziende') + `
     <div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Quando (UTC)</th><th>Chi</th><th>Operazione</th><th>Dettagli</th></tr></thead><tbody>
     ${rows.map((r) => `<tr><td class="small" style="white-space:nowrap">${esc(r.at)}</td><td>${esc(r.user_name || (r.action.includes('display') || r.action === 'auto_rilascio' ? 'Sistema / display' : '—'))}</td><td>${esc(L[r.action] || r.action.replace(/_/g, ' '))}</td><td class="small muted" style="max-width:520px;word-break:break-word">${esc(r.detail).slice(0, 220)}</td></tr>`).join('')}

@@ -8,14 +8,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { createMailer } = require('./lib/mailer');
+const { T, dateLong } = require('./lib/templates');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const TZ = process.env.TIMEZONE || 'Europe/Rome';
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const SESSION_DAYS = 30;
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, 'sale.db'));
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
 
@@ -95,7 +98,41 @@ CREATE TABLE IF NOT EXISTS audit (
   action TEXT,
   detail TEXT
 );
+CREATE TABLE IF NOT EXISTS penalties (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  booking_id INTEGER REFERENCES bookings(id) ON DELETE SET NULL,
+  company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reason TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'da_addebitare' CHECK (status IN ('da_addebitare','addebitata','annullata')),
+  note TEXT DEFAULT '',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT
+);
 `);
+// colonne aggiunte nelle versioni successive (le installazioni esistenti vengono aggiornate)
+function addColumn(table, col, def) {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+addColumn('users', 'first_name', "TEXT DEFAULT ''");
+addColumn('users', 'last_name', "TEXT DEFAULT ''");
+addColumn('users', 'email_verified', 'INTEGER NOT NULL DEFAULT 1');
+addColumn('users', 'verify_token', 'TEXT');
+addColumn('users', 'verify_expires', 'INTEGER');
+addColumn('users', 'reset_token', 'TEXT');
+addColumn('users', 'reset_expires', 'INTEGER');
+addColumn('users', 'self_registered', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('users', 'gender', 'TEXT');
+addColumn('users', 'gym_waiver_status', "TEXT NOT NULL DEFAULT 'nessuno'");
+addColumn('users', 'gym_waiver_file', 'TEXT');
+addColumn('users', 'gym_waiver_at', 'TEXT');
+addColumn('users', 'gym_waiver_note', "TEXT DEFAULT ''");
+addColumn('rooms', 'kind', "TEXT NOT NULL DEFAULT 'sala'");
+addColumn('bookings', 'gender', 'TEXT');
+addColumn('bookings', 'reminder_sent_at', 'TEXT');
+addColumn('bookings', 'cancelled_at', 'TEXT');
+db.exec('CREATE INDEX IF NOT EXISTS idx_users_verify ON users(verify_token); CREATE INDEX IF NOT EXISTS idx_users_reset ON users(reset_token);');
 
 const DEFAULT_SETTINGS = {
   building_name: 'CARDO Centro Uffici',
@@ -106,11 +143,21 @@ const DEFAULT_SETTINGS = {
   max_advance_days: '60',
   max_active_per_company: '0',       // 0 = illimitate
   max_repeat_weeks: '12',
-  checkin_required: '0',             // 1 = la prenotazione va confermata al display
+  checkin_required: '1',             // 1 = la prenotazione va confermata al display (serve per le penali)
   checkin_grace_minutes: '15',
   show_titles_to_others: '1',        // gli altri vedono il titolo della riunione
   display_show_title: '1',           // il display mostra il titolo
   display_show_company: '1',         // il display mostra l'azienda
+  default_monthly_quota_hours: '10', // ore di sala al mese per azienda (vuoto = illimitate)
+  registration_enabled: '1',         // le aziende possono registrarsi da sole
+  admin_notify_email: '',            // avviso all'amministrazione per ogni nuova iscrizione
+  reminders_enabled: '1',            // promemoria 24 ore prima
+  penalties_enabled: '1',
+  penalty_amount: '25',              // euro
+  cancel_notice_hours: '24',         // preavviso minimo per annullare senza penale
+  gym_rule: 'uno_per_sesso',         // uno_per_sesso | stesso_sesso | misto
+  gym_waiver_email: 'info@ufficicardo.com',
+  checkin_enabled_at: '',
   lobby_token: crypto.randomBytes(16).toString('hex'),
 };
 for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
@@ -184,11 +231,11 @@ function seed() {
       ['Sala Verdi', 12, 'Piano terra', 'Schermo 75", videoconferenza, lavagna', '#0a615f'],
       ['Sala Puccini', 8, 'Piano terra', 'Schermo 55", videoconferenza', '#a7406b'],
       ['Sala Rossini', 6, 'Primo piano', 'Schermo 55"', '#b9771f'],
-      ['Sala Vivaldi', 4, 'Primo piano', 'Monitor 43", ideale per call', '#5b8a72'],
+      ['Palestra', 2, 'Primo piano', 'Tapis roulant, pesi, panca', '#5b8a72', 'palestra'],
       ['Sala Conferenze', 30, 'Secondo piano', 'Proiettore, microfoni, impianto audio', '#4a5a86'],
     ];
-    const ins = db.prepare('INSERT INTO rooms(name,capacity,location,equipment,color,display_token,sort_order) VALUES (?,?,?,?,?,?,?)');
-    rooms.forEach((r, i) => ins.run(...r, crypto.randomBytes(16).toString('hex'), i));
+    const ins = db.prepare('INSERT INTO rooms(name,capacity,location,equipment,color,kind,display_token,sort_order) VALUES (?,?,?,?,?,?,?,?)');
+    rooms.forEach((r, i) => ins.run(r[0], r[1], r[2], r[3], r[4], r[5] || 'sala', crypto.randomBytes(16).toString('hex'), i));
   }
   const adminCount = db.prepare("SELECT COUNT(*) c FROM users WHERE role='admin'").get().c;
   if (adminCount === 0) {
@@ -240,7 +287,7 @@ function seedDemo() {
     insU.run(c.lastInsertRowid, `Utente ${n}`, `utente@${slug}.it`, pw, 'utente');
   }
   // qualche prenotazione di esempio nei prossimi giorni lavorativi
-  const rooms = db.prepare('SELECT id FROM rooms').all();
+  const rooms = db.prepare("SELECT id FROM rooms WHERE kind<>'palestra'").all();
   const ins = db.prepare('INSERT INTO bookings(room_id,company_id,user_id,date,start,end,title,attendees) VALUES (?,?,?,?,?,?,?,?)');
   const titles = ['Riunione di team', 'Call cliente', 'Colloquio', 'Formazione', 'Board mensile', 'Demo prodotto', 'Revisione progetto'];
   let d = now().date;
@@ -270,6 +317,73 @@ seed();
   const map = { '#2563eb': '#0a615f', '#059669': '#a7406b', '#d97706': '#b9771f', '#7c3aed': '#5b8a72', '#dc2626': '#4a5a86' };
   for (const [a, b] of Object.entries(map)) db.prepare('UPDATE rooms SET color=? WHERE lower(color)=?').run(b, a);
 })();
+// v2: il check-in al tablet diventa obbligatorio (serve a rilevare il mancato utilizzo per le penali)
+(function migrateV2() {
+  if (getSettings().mig_v2 !== '1') {
+    db.prepare("UPDATE settings SET value='1' WHERE key='checkin_required'").run();
+    db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES ('mig_v2','1')").run();
+  }
+  if (!getSettings().checkin_enabled_at) db.prepare("UPDATE settings SET value=CURRENT_TIMESTAMP WHERE key='checkin_enabled_at'").run();
+  if (getSettings().mig_gym !== '1') {
+    if (!db.prepare("SELECT 1 FROM rooms WHERE kind='palestra'").get()) {
+      const v = db.prepare("SELECT id FROM rooms WHERE name='Sala Vivaldi'").get();
+      if (v) {
+        db.prepare(`UPDATE bookings SET status='cancellata' WHERE room_id=? AND status='confermata' AND date>=?`).run(v.id, now().date);
+        db.prepare("UPDATE rooms SET name='Palestra', kind='palestra', capacity=2, equipment='Tapis roulant, pesi, panca' WHERE id=?").run(v.id);
+      }
+    }
+    db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES ('mig_gym','1')").run();
+  }
+})();
+
+// ---------------------------------------------------------------- email
+const mailer = createMailer(db);
+let baseUrl = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+const BASE = () => baseUrl || getSettings().public_url || '';
+function rememberBase(req) {
+  if (process.env.PUBLIC_URL) return;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  if (!host) return;
+  const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+  const b = `${proto}://${host}`;
+  if (b !== baseUrl) { baseUrl = b; db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES ('public_url',?)").run(b); }
+}
+function sendMail(to, tpl, data, extra = {}) {
+  if (!to) return null;
+  const s = getSettings();
+  const m = T[tpl]({ base: BASE(), building: s.building_name, ...data });
+  return mailer.queue({ to, subject: m.subject, html: m.html, text: m.text, kind: tpl, ...extra });
+}
+const minutesUntil = (date, time) => { const n = now(); return daysBetween(n.date, date) * 1440 + toMin(time) - n.min; };
+function penaltyCfg() {
+  const s = getSettings();
+  return { on: s.penalties_enabled === '1', amount: parseFloat(String(s.penalty_amount).replace(',', '.')) || 0, notice: parseFloat(s.cancel_notice_hours) || 0 };
+}
+function addPenalty(b, reason) {
+  const p = penaltyCfg();
+  if (!p.on || !b.company_id) return null;
+  if (db.prepare('SELECT 1 FROM penalties WHERE booking_id=?').get(b.id)) return null;
+  const r = db.prepare('INSERT INTO penalties(booking_id,company_id,user_id,reason,amount) VALUES (?,?,?,?,?)').run(b.id, b.company_id, b.user_id, reason, p.amount);
+  const u = b.user_id ? db.prepare('SELECT name,email FROM users WHERE id=?').get(b.user_id) : null;
+  const c = db.prepare('SELECT name FROM companies WHERE id=?').get(b.company_id);
+  const room = db.prepare('SELECT name FROM rooms WHERE id=?').get(b.room_id);
+  if (u) sendMail(u.email, 'penalty', { name: u.name, company: c ? c.name : '', room: room ? room.name : '', date: b.date, start: b.start, end: b.end, reason, amount: p.amount });
+  audit(null, 'penale', { booking: b.id, reason, amount: p.amount });
+  return Number(r.lastInsertRowid);
+}
+function buildIcs(events) {
+  const s = getSettings();
+  const dt = (d, t) => d.replace(/-/g, '') + 'T' + t.replace(':', '') + '00';
+  const esc = (x) => String(x || '').replace(/[\\;,]/g, (m) => '\\' + m).replace(/\n/g, '\\n');
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Gestionale Sale//IT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH'];
+  for (const e of events) {
+    lines.push('BEGIN:VEVENT', `UID:sala-${e.id}@gestionale-sale`, `DTSTAMP:${stamp}`, `DTSTART;TZID=${TZ}:${dt(e.date, e.start)}`, `DTEND;TZID=${TZ}:${dt(e.date, e.end)}`,
+      `SUMMARY:${esc(e.title)}`, `LOCATION:${esc(e.room_name + ' — ' + s.building_name)}`, `DESCRIPTION:${esc(e.description || '')}`, 'END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
 
 // ---------------------------------------------------------------- regole prenotazione
 // Libera automaticamente le prenotazioni senza check-in (se il check-in è obbligatorio)
@@ -277,14 +391,16 @@ function autoRelease() {
   const s = S();
   if (!s.checkin) return 0;
   const n = now();
-  const rows = db.prepare(`SELECT id,start FROM bookings WHERE status='confermata' AND checked_in_at IS NULL AND date=?`).all(n.date);
+  // solo prenotazioni create dopo l'attivazione del check-in, e da almeno "grace" minuti (chi prenota l'ora in corso ha il suo margine)
+  const rows = db.prepare(`SELECT * FROM bookings WHERE status='confermata' AND checked_in_at IS NULL AND date=? AND created_at >= ?
+    AND (strftime('%s','now') - strftime('%s', created_at)) >= ? * 60`).all(n.date, s.checkin_enabled_at || '', s.grace);
   let changed = 0;
   for (const b of rows) {
-    // finestra di 10 minuti: evita di liberare riunioni già in corso quando il check-in viene attivato a metà giornata
     const limit = toMin(b.start) + s.grace;
-    if (n.min >= limit && n.min < limit + 10) {
+    if (n.min >= limit && n.min < toMin(b.end)) {
       db.prepare(`UPDATE bookings SET status='liberata', updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(b.id);
       audit(null, 'auto_rilascio', { booking: b.id });
+      addPenalty(b, 'mancato_utilizzo');
       changed++;
     }
   }
@@ -318,23 +434,54 @@ function conflict(roomId, date, start, end, excludeId = 0) {
   return db.prepare(`SELECT b.id,b.start,b.end,c.name company FROM bookings b LEFT JOIN companies c ON c.id=b.company_id
     WHERE b.room_id=? AND b.date=? AND b.status='confermata' AND b.id<>? AND b.start < ? AND b.end > ?`).get(roomId, date, excludeId, end, start);
 }
+// Ore di sala usate nel mese (la palestra non scala dal monte ore)
 function companyHoursInMonth(companyId, month, excludeId = 0) {
-  const rows = db.prepare(`SELECT start,end FROM bookings WHERE company_id=? AND status='confermata' AND substr(date,1,7)=? AND id<>?`).all(companyId, month, excludeId);
+  const rows = db.prepare(`SELECT b.start,b.end FROM bookings b JOIN rooms r ON r.id=b.room_id
+    WHERE b.company_id=? AND b.status='confermata' AND r.kind<>'palestra' AND substr(b.date,1,7)=? AND b.id<>?`).all(companyId, month, excludeId);
   return rows.reduce((t, r) => t + (toMin(r.end) - toMin(r.start)) / 60, 0);
 }
+function effectiveQuota(companyId) {
+  const c = db.prepare('SELECT monthly_quota_hours q FROM companies WHERE id=?').get(companyId);
+  if (c && c.q != null) return c.q;
+  const d = String(getSettings().default_monthly_quota_hours ?? '').replace(',', '.').trim();
+  return d === '' ? null : parseFloat(d);
+}
+const fmtH = (h) => (Math.round(h * 10) / 10).toString().replace('.', ',');
+const MESI_IT = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre'];
 function quotaIssue(companyId, date, start, end, excludeId = 0) {
   if (!companyId) return null;
-  const c = db.prepare('SELECT monthly_quota_hours q FROM companies WHERE id=?').get(companyId);
-  if (!c || c.q == null) return null;
+  const q = effectiveQuota(companyId);
+  if (q == null || isNaN(q)) return null;
   const used = companyHoursInMonth(companyId, date.slice(0, 7), excludeId);
   const add = (toMin(end) - toMin(start)) / 60;
-  if (used + add > c.q + 1e-9) return `Monte ore mensile superato: usate ${used.toFixed(1)} h su ${c.q} h disponibili per ${date.slice(0, 7)}`;
+  const mese = MESI_IT[parseInt(date.slice(5, 7), 10) - 1];
+  if (used >= q - 1e-9) return `La tua azienda ha esaurito le ${fmtH(q)} ore di sala di ${mese}. Il monte ore si rinnova il primo giorno del mese.`;
+  if (used + add > q + 1e-9) return `Restano ${fmtH(q - used)} ore di sala per ${mese}: riduci la durata della prenotazione (monte ore ${fmtH(q)} h al mese).`;
+  return null;
+}
+function quotaInfo(companyId) {
+  if (!companyId) return null;
+  const month = now().date.slice(0, 7);
+  const limit = effectiveQuota(companyId);
+  const used = +companyHoursInMonth(companyId, month).toFixed(2);
+  return { month, used, limit: limit == null || isNaN(limit) ? null : limit, remaining: limit == null || isNaN(limit) ? null : Math.max(0, +(limit - used).toFixed(2)) };
+}
+function gymIssue(room, date, start, end, gender, userId, excludeId = 0) {
+  const a = toMin(start); const b = toMin(end);
+  if (b - a !== 60 || a % 60) return "In palestra si prenota un'ora alla volta, partendo dall'ora esatta (es. 10:00–11:00)";
+  const rows = db.prepare(`SELECT id,user_id,gender FROM bookings WHERE room_id=? AND date=? AND status='confermata' AND id<>? AND start < ? AND end > ?`).all(room.id, date, excludeId, end, start);
+  if (rows.some((r) => r.user_id === userId)) return 'Hai già una prenotazione in palestra in questa ora';
+  const rule = getSettings().gym_rule;
+  const max = rule === 'uno_per_sesso' ? 2 : Math.max(1, room.capacity || 2);
+  if (rows.length >= max) return `Palestra al completo in questa ora (massimo ${max} persone)`;
+  if (rule === 'uno_per_sesso' && rows.some((r) => r.gender === gender)) return gender === 'F' ? "Il posto donna di quest'ora è già occupato" : "Il posto uomo di quest'ora è già occupato";
+  if (rule === 'stesso_sesso' && rows.some((r) => r.gender && r.gender !== gender)) return `In quest'ora la palestra è già prenotata da ${gender === 'F' ? 'uomini' : 'donne'}`;
   return null;
 }
 function activeIssue(companyId, s, adding = 1) {
   if (!companyId || !s.maxActive) return null;
   const n = now();
-  const cnt = db.prepare(`SELECT COUNT(*) c FROM bookings WHERE company_id=? AND status='confermata' AND (date>? OR (date=? AND end>?))`).get(companyId, n.date, n.date, n.time).c;
+  const cnt = db.prepare(`SELECT COUNT(*) c FROM bookings b JOIN rooms r ON r.id=b.room_id WHERE b.company_id=? AND b.status='confermata' AND r.kind<>'palestra' AND (b.date>? OR (b.date=? AND b.end>?))`).get(companyId, n.date, n.date, n.time).c;
   if (cnt + adding > s.maxActive) return `La tua azienda ha già ${cnt} prenotazioni attive (massimo ${s.maxActive})`;
   return null;
 }
@@ -355,7 +502,7 @@ const send = (res, status, body, headers = {}) => {
 };
 async function readBody(req) {
   const chunks = []; let size = 0;
-  for await (const c of req) { size += c.length; if (size > 2e6) throw new HttpError(413, 'Richiesta troppo grande'); chunks.push(c); }
+  for await (const c of req) { size += c.length; if (size > 14e6) throw new HttpError(413, 'Richiesta troppo grande (massimo 10 MB)'); chunks.push(c); }
   if (!chunks.length) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new HttpError(400, 'JSON non valido'); }
 }
@@ -368,7 +515,7 @@ function currentUser(req) {
   if (!row || !row.active || (row.company_id && row.company_active === 0)) return null;
   return row;
 }
-const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, company_id: u.company_id, company_name: u.company_name || null, must_change_password: !!u.must_change_password });
+const publicUser = (u) => ({ id: u.id, name: u.name, first_name: u.first_name || '', last_name: u.last_name || '', email: u.email, role: u.role, company_id: u.company_id, company_name: u.company_name || null, must_change_password: !!u.must_change_password, gender: u.gender || null, gym_waiver_status: u.gym_waiver_status || 'nessuno', gym_waiver_note: u.gym_waiver_note || '' });
 const need = (cond, status, msg) => { if (!cond) throw new HttpError(status, msg); };
 const str = (v, max = 200) => (v == null ? '' : String(v).trim().slice(0, max));
 
@@ -393,7 +540,7 @@ function bookingView(b, user, s) {
     user_name: (isAdmin || sameCompany) ? b.user_name : undefined,
     attendees: (isAdmin || sameCompany) ? b.attendees : undefined,
     notes: (isAdmin || sameCompany) ? b.notes : undefined,
-    series_id: b.series_id, checked_in: !!b.checked_in_at,
+    series_id: b.series_id, checked_in: !!b.checked_in_at, gender: b.gender || null,
     mine: !!mine, own_company: !!sameCompany,
     can_edit: !!(isAdmin || mine || (sameCompany && user.role === 'referente')),
   };
@@ -402,7 +549,7 @@ const BOOKING_SELECT = `SELECT b.*, c.name company_name, u.name user_name, r.nam
   LEFT JOIN companies c ON c.id=b.company_id LEFT JOIN users u ON u.id=b.user_id JOIN rooms r ON r.id=b.room_id`;
 
 function roomsList(all = false) {
-  return db.prepare(`SELECT id,name,capacity,location,equipment,color,sort_order,active${all ? ',display_token' : ''} FROM rooms ${all ? '' : 'WHERE active=1'} ORDER BY sort_order,id`).all();
+  return db.prepare(`SELECT id,name,kind,capacity,location,equipment,color,sort_order,active${all ? ',display_token' : ''} FROM rooms ${all ? '' : 'WHERE active=1'} ORDER BY sort_order,id`).all();
 }
 
 // ---------------------------------------------------------------- display (tablet fuori dalle sale)
@@ -422,8 +569,10 @@ function roomState(room, s, n) {
     title: s.display_show_title === '1' ? b.title : 'Riunione',
     company: s.display_show_company === '1' ? (b.company_name || '') : '',
     checked_in: !!b.checked_in_at,
+    gender: b.gender || null,
   }));
-  const current = items.find((b) => toMin(b.start) <= n.min && n.min < toMin(b.end)) || null;
+  const currentAll = items.filter((b) => toMin(b.start) <= n.min && n.min < toMin(b.end));
+  const current = currentAll[0] || null;
   const next = items.find((b) => toMin(b.start) > n.min) || null;
   let status = 'libera';
   if (!open) status = 'chiusa';
@@ -432,8 +581,8 @@ function roomState(room, s, n) {
   else if (n.min < toMin(s.open_time) || n.min >= toMin(s.close_time)) status = 'fuori_orario';
   const freeUntil = !current ? (next ? next.start : s.close_time) : null;
   return {
-    room: { id: room.id, name: room.name, capacity: room.capacity, location: room.location, equipment: room.equipment, color: room.color },
-    status, open, current, next, free_until: freeUntil, today: items,
+    room: { id: room.id, name: room.name, kind: room.kind || 'sala', capacity: room.capacity, location: room.location, equipment: room.equipment, color: room.color },
+    status, open, current, current_all: currentAll, next, free_until: freeUntil, today: items,
   };
 }
 
@@ -449,6 +598,7 @@ route('POST', '/api/login', async (req, res, ctx) => {
   const { email, password } = ctx.body;
   checkRate(req.socket.remoteAddress + '|' + str(email).toLowerCase());
   const u = db.prepare(`SELECT u.*, c.active company_active FROM users u LEFT JOIN companies c ON c.id=u.company_id WHERE email=?`).get(str(email));
+  need(!(u && !u.email_verified), 403, "Non hai ancora confermato l'iscrizione: apri il link che ti abbiamo inviato via email (controlla anche lo spam).");
   need(u && u.active && verifyPassword(String(password || ''), u.password_hash), 401, 'Email o password non corretti');
   need(!(u.company_id && u.company_active === 0), 403, "L'azienda risulta disattivata. Contatta l'amministrazione dello stabile.");
   const token = crypto.randomBytes(32).toString('hex');
@@ -474,7 +624,7 @@ route('POST', '/api/me/password', (req, res, ctx) => {
 }, { allowPwChange: true });
 
 // --- configurazione per il calendario
-route('GET', '/api/config', (req, res) => {
+route('GET', '/api/config', (req, res, ctx) => {
   const s = getSettings();
   const n = now();
   send(res, 200, {
@@ -483,6 +633,9 @@ route('GET', '/api/config', (req, res) => {
     max_advance_days: parseInt(s.max_advance_days, 10), max_repeat_weeks: parseInt(s.max_repeat_weeks, 10),
     checkin_required: s.checkin_required === '1', checkin_grace_minutes: parseInt(s.checkin_grace_minutes, 10),
     timezone: TZ,
+    quota: quotaInfo(ctx.user.company_id),
+    penalties: penaltyCfg(),
+    gym_rule: s.gym_rule,
     rooms: roomsList(),
     closures: db.prepare('SELECT date,reason FROM closures WHERE date>=? ORDER BY date').all(addDays(n.date, -31)),
     now: n,
@@ -507,12 +660,12 @@ route('GET', '/api/bookings/mine', (req, res, ctx) => {
   const rows = db.prepare(`${BOOKING_SELECT} WHERE ${where} AND ${past ? 'b.date<?' : 'b.date>=?'} AND b.status<>'cancellata' ORDER BY b.date ${past ? 'DESC' : 'ASC'}, b.start LIMIT 300`)
     .all(scope === 'company' ? ctx.user.company_id : ctx.user.id, n.date);
   const out = rows.map((b) => ({ ...bookingView(b, ctx.user, s), room_name: b.room_name, status: b.status }));
-  let quota = null;
-  if (ctx.user.company_id) {
-    const c = db.prepare('SELECT monthly_quota_hours q FROM companies WHERE id=?').get(ctx.user.company_id);
-    quota = { month: n.date.slice(0, 7), used: +companyHoursInMonth(ctx.user.company_id, n.date.slice(0, 7)).toFixed(2), limit: c ? c.q : null };
-  }
-  send(res, 200, { bookings: out, quota });
+  const quota = quotaInfo(ctx.user.company_id);
+  const canSeeCompany = ctx.user.role === 'referente' || scope === 'company';
+  const penalties = db.prepare(`SELECT p.id,p.reason,p.amount,p.status,p.created_at,b.date,b.start,b.end,r.name room_name,u.name user_name FROM penalties p
+    LEFT JOIN bookings b ON b.id=p.booking_id LEFT JOIN rooms r ON r.id=b.room_id LEFT JOIN users u ON u.id=p.user_id
+    WHERE ${canSeeCompany && ctx.user.company_id ? 'p.company_id=?' : 'p.user_id=?'} AND p.status<>'annullata' ORDER BY p.id DESC LIMIT 50`).all(canSeeCompany && ctx.user.company_id ? ctx.user.company_id : ctx.user.id);
+  send(res, 200, { bookings: out, quota, penalties });
 });
 
 function createBookings(ctx, body) {
@@ -521,41 +674,63 @@ function createBookings(ctx, body) {
   const roomId = parseInt(body.room_id, 10);
   const room = db.prepare('SELECT * FROM rooms WHERE id=? AND active=1').get(roomId);
   need(room, 400, 'Sala non valida');
-  const title = str(body.title, 120);
+  const gym = room.kind === 'palestra';
+  let gender = null;
+  if (gym) {
+    gender = ['M', 'F'].includes(body.gender) ? body.gender : ctx.user.gender;
+    need(['M', 'F'].includes(gender), 400, "Indica se l'accesso è per uomo o per donna");
+    const ws = ctx.user.gym_waiver_status;
+    need(isAdmin || ws === 'approvato', 403, ws === 'in_attesa' ? "Il tuo modulo di responsabilità è in attesa di approvazione: riceverai un'email appena sarà approvato" : 'Per prenotare la palestra devi prima caricare il modulo di responsabilità firmato');
+    if (gender !== ctx.user.gender) db.prepare('UPDATE users SET gender=? WHERE id=?').run(gender, ctx.user.id);
+  }
+  const title = gym ? 'Palestra' : str(body.title, 120);
   need(title, 400, 'Inserisci un titolo per la riunione');
   let companyId = ctx.user.company_id;
   if (isAdmin && body.company_id !== undefined) companyId = body.company_id ? parseInt(body.company_id, 10) : null;
   need(companyId || isAdmin, 400, 'Il tuo utente non è associato a nessuna azienda');
-  const attendees = body.attendees ? Math.max(0, parseInt(body.attendees, 10) || 0) : null;
+  const attendees = gym ? 1 : (body.attendees ? Math.max(0, parseInt(body.attendees, 10) || 0) : null);
   const repeat = Math.min(Math.max(parseInt(body.repeat_weeks, 10) || 0, 0), s.maxRepeat);
   const dates = [body.date]; for (let i = 1; i <= repeat; i++) dates.push(addDays(body.date, 7 * i));
   const first = bookingWindowIssues({ date: body.date, start: body.start, end: body.end }, s, { isAdmin });
   need(!first, 400, first);
-  const c0 = conflict(roomId, body.date, body.start, body.end);
-  need(!c0, 409, `La sala è già occupata dalle ${c0?.start} alle ${c0?.end}${c0?.company ? ' (' + c0.company + ')' : ''}`);
-  if (!isAdmin) {
-    const qa = quotaIssue(companyId, body.date, body.start, body.end); need(!qa, 400, qa);
-    const ai = activeIssue(companyId, s, 1); need(!ai, 400, ai);
+  if (gym) {
+    const g = gymIssue(room, body.date, body.start, body.end, gender, ctx.user.id); need(!g, 409, g);
+  } else {
+    const c0 = conflict(roomId, body.date, body.start, body.end);
+    need(!c0, 409, `La sala è già occupata dalle ${c0?.start} alle ${c0?.end}${c0?.company ? ' (' + c0.company + ')' : ''}`);
+    if (!isAdmin) {
+      const qa = quotaIssue(companyId, body.date, body.start, body.end); need(!qa, 400, qa);
+      const ai = activeIssue(companyId, s, 1); need(!ai, 400, ai);
+    }
   }
   const series = repeat ? crypto.randomBytes(8).toString('hex') : null;
   const created = []; const skipped = [];
-  const ins = db.prepare(`INSERT INTO bookings(room_id,company_id,user_id,date,start,end,title,attendees,notes,series_id) VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  const ins = db.prepare(`INSERT INTO bookings(room_id,company_id,user_id,date,start,end,title,attendees,notes,series_id,gender,reminder_sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const d of dates) {
       const issue = bookingWindowIssues({ date: d, start: body.start, end: body.end }, s, { isAdmin })
-        || (conflict(roomId, d, body.start, body.end) ? 'sala già occupata' : null)
-        || (!isAdmin ? quotaIssue(companyId, d, body.start, body.end) : null)
-        || (!isAdmin && created.length ? activeIssue(companyId, s, 1) : null);
+        || (gym ? gymIssue(room, d, body.start, body.end, gender, ctx.user.id) : (conflict(roomId, d, body.start, body.end) ? 'sala già occupata' : null))
+        || (!isAdmin && !gym ? quotaIssue(companyId, d, body.start, body.end) : null)
+        || (!isAdmin && !gym && created.length ? activeIssue(companyId, s, 1) : null);
       if (issue) { skipped.push({ date: d, reason: issue }); continue; }
-      const r = ins.run(roomId, companyId, ctx.user.id, d, body.start, body.end, title, attendees, str(body.notes, 1000), series);
+      // se mancano meno di 24 ore il promemoria non serve: basta l'email di conferma
+      const reminder = minutesUntil(d, body.start) <= 24 * 60 ? 'non_necessario' : null;
+      const r = ins.run(roomId, companyId, ctx.user.id, d, body.start, body.end, title, attendees, gym ? '' : str(body.notes, 1000), series, gender, reminder);
       created.push({ id: Number(r.lastInsertRowid), date: d });
     }
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   audit(ctx.user.id, 'prenotazione_creata', { room: roomId, created, skipped });
   broadcast();
-  return { created, skipped, warning: attendees && attendees > room.capacity ? `Attenzione: la sala ha ${room.capacity} posti` : null };
+  if (created.length) {
+    const pc = penaltyCfg();
+    const company = companyId ? db.prepare('SELECT name FROM companies WHERE id=?').get(companyId) : null;
+    const ics = buildIcs(created.map((c) => ({ id: c.id, date: c.date, start: body.start, end: body.end, title: gym ? `Palestra (${gender === 'F' ? 'Donna' : 'Uomo'})` : title, room_name: room.name, description: `Prenotazione ${room.name}${company ? ' per ' + company.name : ''}` })));
+    sendMail(ctx.user.email, 'bookingConfirmed', { name: ctx.user.name, room: room.name, title, dates: created.map((c) => c.date), start: body.start, end: body.end, gym, gender, notice: pc.notice, penalty: pc.on ? pc.amount : 0 },
+      { attachments: [{ filename: 'prenotazione.ics', contentType: 'text/calendar; charset=utf-8; method=PUBLISH', content: ics }] });
+  }
+  return { created, skipped, warning: !gym && attendees && attendees > room.capacity ? `Attenzione: la sala ha ${room.capacity} posti` : null };
 }
 route('POST', '/api/bookings', (req, res, ctx) => send(res, 201, createBookings(ctx, ctx.body)));
 
@@ -581,7 +756,10 @@ route('PUT', '/api/bookings/:id', (req, res, ctx) => {
     notes: ctx.body.notes !== undefined ? str(ctx.body.notes, 1000) : b.notes,
   };
   need(nb.title, 400, 'Inserisci un titolo per la riunione');
-  need(db.prepare('SELECT 1 FROM rooms WHERE id=? AND active=1').get(nb.room_id), 400, 'Sala non valida');
+  const oldRoom = db.prepare('SELECT * FROM rooms WHERE id=?').get(b.room_id);
+  const newRoom = db.prepare('SELECT * FROM rooms WHERE id=? AND active=1').get(nb.room_id);
+  need(newRoom, 400, 'Sala non valida');
+  need(oldRoom.kind !== 'palestra' && newRoom.kind !== 'palestra', 400, 'Le prenotazioni della palestra non si modificano: annulla e prenota di nuovo');
   const changedSlot = nb.room_id !== b.room_id || nb.date !== b.date || nb.start !== b.start || nb.end !== b.end;
   if (changedSlot) {
     // se la riunione è in corso si può solo allungare/accorciare la fine
@@ -591,8 +769,10 @@ route('PUT', '/api/bookings/:id', (req, res, ctx) => {
     need(!c, 409, `La sala è già occupata dalle ${c?.start} alle ${c?.end}${c?.company ? ' (' + c.company + ')' : ''}`);
     if (!isAdmin) { const q = quotaIssue(b.company_id, nb.date, nb.start, nb.end, b.id); need(!q, 400, q); }
   }
-  db.prepare(`UPDATE bookings SET room_id=?,date=?,start=?,end=?,title=?,attendees=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-    .run(nb.room_id, nb.date, nb.start, nb.end, nb.title, nb.attendees, nb.notes, b.id);
+  // se cambia giorno/ora il promemoria va ricalcolato
+  const reminder = changedSlot ? (minutesUntil(nb.date, nb.start) <= 24 * 60 ? 'non_necessario' : null) : b.reminder_sent_at;
+  db.prepare(`UPDATE bookings SET room_id=?,date=?,start=?,end=?,title=?,attendees=?,notes=?,reminder_sent_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
+    .run(nb.room_id, nb.date, nb.start, nb.end, nb.title, nb.attendees, nb.notes, reminder, b.id);
   audit(ctx.user.id, 'prenotazione_modificata', { id: b.id, prima: { r: b.room_id, d: b.date, s: b.start, e: b.end }, dopo: nb });
   broadcast();
   send(res, 200, { ok: true });
@@ -604,6 +784,7 @@ route('DELETE', '/api/bookings/:id', (req, res, ctx) => {
   const ids = series
     ? db.prepare(`SELECT id FROM bookings WHERE series_id=? AND status='confermata' AND (date>? OR (date=? AND end>?))`).all(b.series_id, n.date, n.date, n.time).map((r) => r.id)
     : [b.id];
+  const pc = penaltyCfg(); let late = 0;
   for (const id of ids) {
     const row = db.prepare('SELECT * FROM bookings WHERE id=?').get(id);
     // se la riunione è già iniziata, si chiude adesso invece di cancellarla (resta nello storico)
@@ -611,28 +792,21 @@ route('DELETE', '/api/bookings/:id', (req, res, ctx) => {
       // riunione già iniziata: si chiude in questo momento e la sala torna subito libera
       db.prepare(`UPDATE bookings SET end=?, ended_early_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(n.time, id);
     } else {
-      db.prepare(`UPDATE bookings SET status='cancellata', updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(id);
+      db.prepare(`UPDATE bookings SET status='cancellata', cancelled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(id);
+      // annullamento senza il preavviso richiesto: penale (non per le cancellazioni fatte dall'amministrazione)
+      const mu = minutesUntil(row.date, row.start);
+      if (ctx.user.role !== 'admin' && pc.on && pc.notice > 0 && mu > -1 && mu < pc.notice * 60) { if (addPenalty(row, 'cancellazione_tardiva')) late++; }
     }
   }
-  audit(ctx.user.id, 'prenotazione_cancellata', { ids });
+  audit(ctx.user.id, 'prenotazione_cancellata', { ids, penali: late });
   broadcast();
-  send(res, 200, { ok: true, cancelled: ids.length });
+  send(res, 200, { ok: true, cancelled: ids.length, late_penalties: late, penalty_amount: late ? pc.amount : 0 });
 });
 route('GET', '/api/bookings/:id/ics', (req, res, ctx) => {
   const b = db.prepare(`${BOOKING_SELECT} WHERE b.id=?`).get(+ctx.params.id);
   need(b, 404, 'Prenotazione non trovata');
   need(ctx.user.role === 'admin' || b.company_id === ctx.user.company_id, 403, 'Non autorizzato');
-  const s = getSettings();
-  const dt = (d, t) => d.replace(/-/g, '') + 'T' + t.replace(':', '') + '00';
-  const esc = (x) => String(x || '').replace(/[\\;,]/g, (m) => '\\' + m).replace(/\n/g, '\\n');
-  const ics = [
-    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Gestionale Sale//IT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
-    'BEGIN:VEVENT', `UID:sala-${b.id}@gestionale-sale`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}Z`,
-    `DTSTART;TZID=${TZ}:${dt(b.date, b.start)}`, `DTEND;TZID=${TZ}:${dt(b.date, b.end)}`,
-    `SUMMARY:${esc(b.title)}`, `LOCATION:${esc(b.room_name + ' — ' + s.building_name)}`,
-    `DESCRIPTION:${esc(`Prenotazione sala ${b.room_name} per ${b.company_name || ''}${b.notes ? '\n' + b.notes : ''}`)}`,
-    'END:VEVENT', 'END:VCALENDAR',
-  ].join('\r\n');
+  const ics = buildIcs([{ id: b.id, date: b.date, start: b.start, end: b.end, title: b.title, room_name: b.room_name, description: `Prenotazione ${b.room_name} per ${b.company_name || ''}${b.notes ? '\n' + b.notes : ''}` }]);
   send(res, 200, ics, { 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': `attachment; filename="prenotazione-${b.id}.ics"` });
 });
 
@@ -680,7 +854,7 @@ const A = { admin: true };
 route('GET', '/api/admin/companies', (req, res) => {
   const n = now(); const month = n.date.slice(0, 7);
   const rows = db.prepare(`SELECT c.*, (SELECT COUNT(*) FROM users u WHERE u.company_id=c.id) users_count FROM companies c ORDER BY c.name COLLATE NOCASE`).all();
-  send(res, 200, rows.map((c) => ({ ...c, hours_this_month: +companyHoursInMonth(c.id, month).toFixed(2) })));
+  send(res, 200, rows.map((c) => ({ ...c, hours_this_month: +companyHoursInMonth(c.id, month).toFixed(2), quota_effective: effectiveQuota(c.id) })));
 }, A);
 function companyFields(b) {
   const name = str(b.name, 120); need(name, 400, 'Nome azienda obbligatorio');
@@ -710,7 +884,7 @@ route('DELETE', '/api/admin/companies/:id', (req, res, ctx) => {
 }, A);
 
 route('GET', '/api/admin/users', (req, res) => {
-  send(res, 200, db.prepare(`SELECT u.id,u.name,u.email,u.role,u.company_id,u.active,u.last_login,u.must_change_password,c.name company_name FROM users u LEFT JOIN companies c ON c.id=u.company_id ORDER BY c.name COLLATE NOCASE, u.name COLLATE NOCASE`).all());
+  send(res, 200, db.prepare(`SELECT u.id,u.name,u.email,u.role,u.company_id,u.active,u.last_login,u.must_change_password,u.email_verified,u.self_registered,u.gym_waiver_status,u.gender,c.name company_name FROM users u LEFT JOIN companies c ON c.id=u.company_id ORDER BY c.name COLLATE NOCASE, u.name COLLATE NOCASE`).all());
 }, A);
 function userFields(b) {
   const name = str(b.name, 120); const email = str(b.email, 200).toLowerCase();
@@ -732,6 +906,7 @@ route('PUT', '/api/admin/users/:id', (req, res, ctx) => {
   need(!(id === ctx.user.id && (f.role !== 'admin' || !f.active)), 400, 'Non puoi togliere i permessi di amministratore a te stesso');
   try {
     db.prepare('UPDATE users SET company_id=?,name=?,email=?,role=?,active=? WHERE id=?').run(f.companyId, f.name, f.email, f.role, f.active, id);
+    if (f.active) db.prepare('UPDATE users SET email_verified=1, verify_token=NULL WHERE id=? AND email_verified=0').run(id);
   } catch (e) { if (String(e.message).includes('UNIQUE')) throw new HttpError(409, 'Email già registrata'); throw e; }
   if (!f.active) db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);
   audit(ctx.user.id, 'utente_modificato', id); send(res, 200, { ok: true });
@@ -782,14 +957,15 @@ function roomFields(b) {
   const name = str(b.name, 80); need(name, 400, 'Nome sala obbligatorio');
   const cap = parseInt(b.capacity, 10); need(cap > 0, 400, 'Capienza non valida');
   const color = /^#[0-9a-f]{6}$/i.test(b.color || '') ? b.color : '#2563eb';
-  return [name, cap, str(b.location), str(b.equipment, 300), color, parseInt(b.sort_order, 10) || 0, b.active === false || b.active === 0 ? 0 : 1];
+  const kind = b.kind === 'palestra' ? 'palestra' : 'sala';
+  return [name, kind === 'palestra' ? Math.min(cap, 2) : cap, str(b.location), str(b.equipment, 300), color, parseInt(b.sort_order, 10) || 0, b.active === false || b.active === 0 ? 0 : 1, kind];
 }
 route('POST', '/api/admin/rooms', (req, res, ctx) => {
-  const r = db.prepare('INSERT INTO rooms(name,capacity,location,equipment,color,sort_order,active,display_token) VALUES (?,?,?,?,?,?,?,?)').run(...roomFields(ctx.body), crypto.randomBytes(16).toString('hex'));
+  const r = db.prepare('INSERT INTO rooms(name,capacity,location,equipment,color,sort_order,active,kind,display_token) VALUES (?,?,?,?,?,?,?,?,?)').run(...roomFields(ctx.body), crypto.randomBytes(16).toString('hex'));
   audit(ctx.user.id, 'sala_creata', ctx.body.name); broadcast(); send(res, 201, { id: Number(r.lastInsertRowid) });
 }, A);
 route('PUT', '/api/admin/rooms/:id', (req, res, ctx) => {
-  db.prepare('UPDATE rooms SET name=?,capacity=?,location=?,equipment=?,color=?,sort_order=?,active=? WHERE id=?').run(...roomFields(ctx.body), +ctx.params.id);
+  db.prepare('UPDATE rooms SET name=?,capacity=?,location=?,equipment=?,color=?,sort_order=?,active=?,kind=? WHERE id=?').run(...roomFields(ctx.body), +ctx.params.id);
   audit(ctx.user.id, 'sala_modificata', ctx.params.id); broadcast(); send(res, 200, { ok: true });
 }, A);
 route('POST', '/api/admin/rooms/:id/token', (req, res, ctx) => {
@@ -822,8 +998,9 @@ route('DELETE', '/api/admin/closures/:date', (req, res, ctx) => {
   audit(ctx.user.id, 'chiusura_rimossa', ctx.params.date); broadcast(); send(res, 200, { ok: true });
 }, A);
 
-const EDITABLE_SETTINGS = ['building_name', 'open_time', 'close_time', 'slot_minutes', 'max_hours_per_booking', 'max_advance_days', 'max_active_per_company', 'max_repeat_weeks', 'checkin_required', 'checkin_grace_minutes', 'show_titles_to_others', 'display_show_title', 'display_show_company'];
-route('GET', '/api/admin/settings', (req, res) => send(res, 200, getSettings()), A);
+const EDITABLE_SETTINGS = ['building_name', 'open_time', 'close_time', 'slot_minutes', 'max_hours_per_booking', 'max_advance_days', 'max_active_per_company', 'max_repeat_weeks', 'checkin_required', 'checkin_grace_minutes', 'show_titles_to_others', 'display_show_title', 'display_show_company',
+  'default_monthly_quota_hours', 'registration_enabled', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
+route('GET', '/api/admin/settings', (req, res) => send(res, 200, { ...getSettings(), smtp_configured: mailer.isConfigured(), gym_template_custom: fs.existsSync(path.join(DATA_DIR, 'modulo-palestra.pdf')) }), A);
 route('PUT', '/api/admin/settings', (req, res, ctx) => {
   const b = ctx.body;
   if (b.open_time !== undefined || b.close_time !== undefined) {
@@ -831,6 +1008,9 @@ route('PUT', '/api/admin/settings', (req, res, ctx) => {
     need(isTime(o) && isTime(c) && toMin(c) > toMin(o), 400, 'Orari di apertura non validi');
   }
   if (b.slot_minutes !== undefined) need(['15', '30', '60'].includes(String(b.slot_minutes)), 400, 'Durata slot ammessa: 15, 30 o 60 minuti');
+  if (b.gym_rule !== undefined) need(['uno_per_sesso', 'stesso_sesso', 'misto'].includes(b.gym_rule), 400, 'Regola palestra non valida');
+  for (const k of ['gym_waiver_email', 'admin_notify_email']) if (b[k]) need(EMAIL_RE.test(String(b[k]).trim()), 400, 'Indirizzo email non valido');
+  if (b.checkin_required === '1' && getSettings().checkin_required !== '1') db.prepare("UPDATE settings SET value=CURRENT_TIMESTAMP WHERE key='checkin_enabled_at'").run();
   for (const k of EDITABLE_SETTINGS) if (b[k] !== undefined) db.prepare('UPDATE settings SET value=? WHERE key=?').run(String(b[k]), k);
   audit(ctx.user.id, 'impostazioni', b); broadcast(); send(res, 200, getSettings());
 }, A);
@@ -889,12 +1069,231 @@ route('GET', '/api/admin/backup', (req, res, ctx) => {
   send(res, 200, buf, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="sale-backup-${now().date}.db"` });
 }, A);
 
+// ---------------------------------------------------------------- registrazione autonoma
+const normCompany = (n) => String(n || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .replace(/\b(s\.?r\.?l\.?s?|s\.?p\.?a\.?|s\.?n\.?c\.?|s\.?a\.?s\.?|s\.?c\.?a\.?r\.?l\.?|soc(ieta)?|coop(erativa)?)\b/g, ' ').replace(/[^a-z0-9]+/g, '');
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const VERIFY_HOURS = 48;
+route('GET', '/api/public-info', (req, res) => {
+  const s = getSettings();
+  send(res, 200, { building_name: s.building_name, registration_enabled: s.registration_enabled === '1', default_quota: s.default_monthly_quota_hours, open_time: s.open_time, close_time: s.close_time });
+}, { public: true });
+route('POST', '/api/register', (req, res, ctx) => {
+  const s = getSettings();
+  need(s.registration_enabled === '1', 403, "Le iscrizioni online non sono attive: contatta l'amministrazione dello stabile.");
+  checkRate('reg|' + req.socket.remoteAddress);
+  const first = str(ctx.body.first_name, 60); const last = str(ctx.body.last_name, 60);
+  const companyName = str(ctx.body.company, 120).replace(/\s+/g, ' '); const email = str(ctx.body.email, 200).toLowerCase();
+  need(first.length >= 2 && last.length >= 2, 400, 'Inserisci nome e cognome');
+  need(companyName.length >= 2 && normCompany(companyName).length >= 2, 400, "Inserisci il nome dell'azienda");
+  need(EMAIL_RE.test(email), 400, 'Indirizzo email non valido');
+  need(ctx.body.privacy === true, 400, 'Per registrarti devi accettare il trattamento dei dati');
+  const existing = db.prepare('SELECT * FROM users WHERE email=?').get(email);
+  need(!(existing && existing.email_verified), 409, 'Questa email è già registrata: accedi oppure usa "Password dimenticata".');
+  // azienda: si aggancia a una esistente con lo stesso nome, altrimenti viene creata
+  const key = normCompany(companyName);
+  let company = db.prepare('SELECT * FROM companies').all().find((c) => normCompany(c.name) === key);
+  need(!(company && !company.active), 403, "Questa azienda risulta disattivata: contatta l'amministrazione dello stabile.");
+  let newCompany = false;
+  if (!company) {
+    const r = db.prepare('INSERT INTO companies(name,contact_name,contact_email) VALUES (?,?,?)').run(companyName, `${first} ${last}`, email);
+    company = { id: Number(r.lastInsertRowid), name: companyName }; newCompany = true;
+    audit(null, 'azienda_registrata', companyName);
+  }
+  const hasMembers = db.prepare('SELECT COUNT(*) c FROM users WHERE company_id=? AND active=1').get(company.id).c > 0;
+  const token = crypto.randomBytes(24).toString('hex');
+  const expires = Date.now() + VERIFY_HOURS * 3600e3;
+  if (existing) {
+    db.prepare('UPDATE users SET first_name=?,last_name=?,name=?,company_id=?,verify_token=?,verify_expires=? WHERE id=?').run(first, last, `${first} ${last}`, company.id, token, expires, existing.id);
+  } else {
+    db.prepare(`INSERT INTO users(company_id,name,first_name,last_name,email,password_hash,role,must_change_password,active,email_verified,verify_token,verify_expires,self_registered)
+      VALUES (?,?,?,?,?,?,?,0,0,0,?,?,1)`).run(company.id, `${first} ${last}`, first, last, email, hashPassword(crypto.randomBytes(24).toString('hex')), hasMembers ? 'utente' : 'referente', token, expires);
+  }
+  sendMail(email, 'confirmRegistration', { name: first, company: company.name, link: `${BASE()}/conferma.html?token=${token}`, hours: VERIFY_HOURS });
+  audit(null, 'registrazione', { email, company: company.name, nuova_azienda: newCompany });
+  send(res, 201, { ok: true, email });
+}, { public: true });
+route('POST', '/api/register/confirm', (req, res, ctx) => {
+  const token = str(ctx.body.token, 100);
+  need(token, 400, 'Link non valido');
+  const u = db.prepare('SELECT u.*, c.name company_name FROM users u LEFT JOIN companies c ON c.id=u.company_id WHERE verify_token=?').get(token);
+  need(u, 404, 'Questo link non è valido o è già stato usato. Se hai già confermato, accedi con la password ricevuta via email.');
+  need(u.verify_expires > Date.now(), 410, 'Il link è scaduto: registrati di nuovo con la stessa email per riceverne uno nuovo.');
+  const pw = randomPassword();
+  db.prepare('UPDATE users SET password_hash=?, active=1, email_verified=1, verify_token=NULL, verify_expires=NULL, must_change_password=0 WHERE id=?').run(hashPassword(pw), u.id);
+  sendMail(u.email, 'welcome', { name: u.first_name || u.name, company: u.company_name || '', email: u.email, password: pw, quota: u.company_id ? effectiveQuota(u.company_id) : null });
+  const notify = getSettings().admin_notify_email;
+  if (notify) sendMail(notify, 'adminNewUser', { name: u.name, email: u.email, company: u.company_name || '', newCompany: u.role === 'referente' });
+  audit(u.id, 'iscrizione_confermata', u.email);
+  broadcast();
+  send(res, 200, { ok: true, name: u.first_name || u.name, email: u.email, company: u.company_name, password: pw });
+}, { public: true });
+route('POST', '/api/password/forgot', (req, res, ctx) => {
+  checkRate('forgot|' + req.socket.remoteAddress);
+  const email = str(ctx.body.email, 200).toLowerCase();
+  const u = EMAIL_RE.test(email) ? db.prepare('SELECT * FROM users WHERE email=? AND active=1 AND email_verified=1').get(email) : null;
+  if (u) {
+    const token = crypto.randomBytes(24).toString('hex');
+    db.prepare('UPDATE users SET reset_token=?, reset_expires=? WHERE id=?').run(token, Date.now() + 2 * 3600e3, u.id);
+    sendMail(u.email, 'passwordReset', { name: u.first_name || u.name, link: `${BASE()}/conferma.html?reset=${token}` });
+    audit(u.id, 'richiesta_password', '');
+  }
+  // risposta identica in ogni caso, per non rivelare quali email sono registrate
+  send(res, 200, { ok: true });
+}, { public: true });
+route('POST', '/api/password/reset', (req, res, ctx) => {
+  const token = str(ctx.body.token, 100);
+  const u = token ? db.prepare('SELECT * FROM users WHERE reset_token=?').get(token) : null;
+  need(u, 404, 'Questo link non è valido o è già stato usato.');
+  need(u.reset_expires > Date.now(), 410, 'Il link è scaduto: richiedi di nuovo una nuova password.');
+  const pw = randomPassword();
+  db.prepare('UPDATE users SET password_hash=?, reset_token=NULL, reset_expires=NULL, must_change_password=0 WHERE id=?').run(hashPassword(pw), u.id);
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(u.id);
+  sendMail(u.email, 'newPassword', { name: u.first_name || u.name, email: u.email, password: pw });
+  audit(u.id, 'password_rigenerata', '');
+  send(res, 200, { ok: true, email: u.email, password: pw });
+}, { public: true });
+
+// ---------------------------------------------------------------- palestra: modulo di responsabilità
+const WAIVER_TYPES = { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png' };
+function waiverTemplatePath() {
+  const custom = path.join(DATA_DIR, 'modulo-palestra.pdf');
+  return fs.existsSync(custom) ? custom : path.join(PUBLIC_DIR, 'modulo-palestra.pdf');
+}
+route('GET', '/api/gym/template', (req, res) => {
+  send(res, 200, fs.readFileSync(waiverTemplatePath()), { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="modulo-responsabilita-palestra.pdf"' });
+});
+route('POST', '/api/gym/waiver', (req, res, ctx) => {
+  const u = ctx.user;
+  need(u.company_id || u.role === 'admin', 400, 'Utente non associato a un\'azienda');
+  need(['M', 'F'].includes(ctx.body.gender), 400, "Indica se l'accesso è per uomo o per donna");
+  need(ctx.body.accept === true, 400, 'Conferma di aver letto e firmato il modulo');
+  const ext = String(ctx.body.filename || '').toLowerCase().split('.').pop();
+  need(WAIVER_TYPES[ext], 400, 'Carica il modulo firmato in PDF, JPG o PNG');
+  const data = Buffer.from(String(ctx.body.data || ''), 'base64');
+  need(data.length > 1000, 400, 'Il file sembra vuoto');
+  need(data.length <= 10 * 1024 * 1024, 413, 'Il file è troppo grande (massimo 10 MB)');
+  const sig = data.subarray(0, 4).toString('hex');
+  need((ext === 'pdf' && sig === '25504446') || (ext === 'png' && sig === '89504e47') || (['jpg', 'jpeg'].includes(ext) && sig.startsWith('ffd8')), 400, "Il file non è un PDF o un'immagine valida");
+  const dir = path.join(UPLOAD_DIR, 'moduli-palestra'); fs.mkdirSync(dir, { recursive: true });
+  const fname = `${u.id}-${Date.now()}.${ext === 'jpeg' ? 'jpg' : ext}`;
+  fs.writeFileSync(path.join(dir, fname), data);
+  db.prepare("UPDATE users SET gym_waiver_status='in_attesa', gym_waiver_file=?, gym_waiver_at=CURRENT_TIMESTAMP, gym_waiver_note='', gender=? WHERE id=?").run(fname, ctx.body.gender, u.id);
+  const s = getSettings();
+  const company = u.company_name || '';
+  const stamp = new Intl.DateTimeFormat('it-IT', { timeZone: TZ, dateStyle: 'short', timeStyle: 'short' }).format(new Date());
+  const safe = `${u.name}`.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Za-z0-9]+/g, '-');
+  sendMail(s.gym_waiver_email, 'waiverToOffice', { name: u.name, email: u.email, company, gender: ctx.body.gender, uploaded: stamp },
+    { attachments: [{ filename: `modulo-palestra-${safe}.${ext === 'jpeg' ? 'jpg' : ext}`, contentType: WAIVER_TYPES[ext], content: data }] });
+  audit(u.id, 'modulo_palestra_caricato', fname);
+  broadcast();
+  send(res, 200, { ok: true, status: 'in_attesa' });
+});
+
+// ---------------------------------------------------------------- promemoria 24 ore prima
+function sendReminders() {
+  const s = getSettings();
+  if (s.reminders_enabled !== '1') return;
+  const n = now();
+  const pc = penaltyCfg();
+  const rows = db.prepare(`SELECT b.*, u.email, u.name user_name, u.first_name, r.name room_name, r.kind FROM bookings b JOIN users u ON u.id=b.user_id JOIN rooms r ON r.id=b.room_id
+    WHERE b.status='confermata' AND b.reminder_sent_at IS NULL AND b.date BETWEEN ? AND ?`).all(n.date, addDays(n.date, 3));
+  for (const b of rows) {
+    const mu = minutesUntil(b.date, b.start);
+    if (mu > 0 && mu <= 24 * 60) {
+      db.prepare('UPDATE bookings SET reminder_sent_at=CURRENT_TIMESTAMP WHERE id=?').run(b.id);
+      sendMail(b.email, 'reminder', { name: b.first_name || b.user_name, room: b.room_name, title: b.title, date: b.date, start: b.start, end: b.end, gym: b.kind === 'palestra', notice: pc.notice, penalty: pc.on ? pc.amount : 0 });
+    } else if (mu <= 0) {
+      db.prepare("UPDATE bookings SET reminder_sent_at='scaduto' WHERE id=?").run(b.id);
+    }
+  }
+}
+setInterval(sendReminders, 60 * 1000);
+setTimeout(sendReminders, 5000);
+
+// ---------------------------------------------------------------- amministrazione: funzioni aggiuntive
+route('GET', '/api/admin/live', (req, res) => {
+  const s = getSettings(); const n = now();
+  send(res, 200, { now: n, rooms: roomsList().map((r) => roomState(r, s, n)), pending_waivers: db.prepare("SELECT COUNT(*) c FROM users WHERE gym_waiver_status='in_attesa'").get().c,
+    open_penalties: db.prepare("SELECT COUNT(*) c FROM penalties WHERE status='da_addebitare'").get().c });
+}, A);
+route('GET', '/api/admin/waivers', (req, res) => {
+  send(res, 200, db.prepare(`SELECT u.id,u.name,u.email,u.gender,u.gym_waiver_status status,u.gym_waiver_at uploaded_at,u.gym_waiver_note note,u.gym_waiver_file file,c.name company_name
+    FROM users u LEFT JOIN companies c ON c.id=u.company_id WHERE u.gym_waiver_status<>'nessuno' ORDER BY CASE u.gym_waiver_status WHEN 'in_attesa' THEN 0 ELSE 1 END, u.gym_waiver_at DESC`).all());
+}, A);
+route('GET', '/api/admin/waivers/:id/file', (req, res, ctx) => {
+  const u = db.prepare('SELECT gym_waiver_file f, name FROM users WHERE id=?').get(+ctx.params.id);
+  need(u && u.f, 404, 'Modulo non trovato');
+  const file = path.join(UPLOAD_DIR, 'moduli-palestra', path.basename(u.f));
+  need(fs.existsSync(file), 404, 'File non trovato');
+  const ext = path.extname(file).slice(1);
+  send(res, 200, fs.readFileSync(file), { 'Content-Type': WAIVER_TYPES[ext] || 'application/octet-stream', 'Content-Disposition': `inline; filename="modulo-${u.name.replace(/[^A-Za-z0-9]+/g, '-')}.${ext}"` });
+}, A);
+route('POST', '/api/admin/waivers/:id', (req, res, ctx) => {
+  const u = db.prepare('SELECT * FROM users WHERE id=?').get(+ctx.params.id);
+  need(u, 404, 'Utente non trovato');
+  const approved = ctx.body.decision === 'approvato';
+  need(approved || ctx.body.decision === 'rifiutato', 400, 'Decisione non valida');
+  const note = str(ctx.body.note, 500);
+  db.prepare('UPDATE users SET gym_waiver_status=?, gym_waiver_note=? WHERE id=?').run(approved ? 'approvato' : 'rifiutato', note, u.id);
+  sendMail(u.email, 'waiverDecision', { name: u.first_name || u.name, approved, note });
+  audit(ctx.user.id, approved ? 'modulo_palestra_approvato' : 'modulo_palestra_rifiutato', u.id);
+  broadcast(); send(res, 200, { ok: true });
+}, A);
+route('POST', '/api/admin/gym-template', (req, res, ctx) => {
+  const data = Buffer.from(String(ctx.body.data || ''), 'base64');
+  need(data.subarray(0, 4).toString('hex') === '25504446', 400, 'Carica un file PDF');
+  fs.writeFileSync(path.join(DATA_DIR, 'modulo-palestra.pdf'), data);
+  audit(ctx.user.id, 'modello_modulo_palestra_aggiornato', ''); send(res, 200, { ok: true });
+}, A);
+route('DELETE', '/api/admin/gym-template', (req, res, ctx) => {
+  const f = path.join(DATA_DIR, 'modulo-palestra.pdf'); if (fs.existsSync(f)) fs.unlinkSync(f);
+  audit(ctx.user.id, 'modello_modulo_palestra_ripristinato', ''); send(res, 200, { ok: true });
+}, A);
+const PENALTY_SELECT = `SELECT p.*, c.name company_name, u.name user_name, u.email user_email, b.date, b.start, b.end, r.name room_name FROM penalties p
+  LEFT JOIN companies c ON c.id=p.company_id LEFT JOIN users u ON u.id=p.user_id LEFT JOIN bookings b ON b.id=p.booking_id LEFT JOIN rooms r ON r.id=b.room_id`;
+route('GET', '/api/admin/penalties', (req, res, ctx) => {
+  const st = ctx.query.get('status');
+  send(res, 200, db.prepare(`${PENALTY_SELECT} ${st ? 'WHERE p.status=?' : ''} ORDER BY p.id DESC LIMIT 1000`).all(...(st ? [st] : [])));
+}, A);
+route('PUT', '/api/admin/penalties/:id', (req, res, ctx) => {
+  need(['da_addebitare', 'addebitata', 'annullata'].includes(ctx.body.status), 400, 'Stato non valido');
+  db.prepare('UPDATE penalties SET status=?, note=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(ctx.body.status, str(ctx.body.note, 500), +ctx.params.id);
+  audit(ctx.user.id, 'penale_' + ctx.body.status, ctx.params.id); send(res, 200, { ok: true });
+}, A);
+route('GET', '/api/admin/penalties.csv', (req, res) => {
+  const rows = db.prepare(`${PENALTY_SELECT} ORDER BY p.id DESC`).all();
+  const head = ['ID', 'Registrata il', 'Azienda', 'Utente', 'Email', 'Sala', 'Data', 'Orario', 'Motivo', 'Importo', 'Stato', 'Note'];
+  const lines = [head.join(';')].concat(rows.map((p) => [p.id, p.created_at, p.company_name, p.user_name, p.user_email, p.room_name, p.date, `${p.start}-${p.end}`, p.reason === 'cancellazione_tardiva' ? 'Annullamento tardivo' : 'Mancato utilizzo', String(p.amount.toFixed(2)).replace('.', ','), p.status, p.note].map(csvCell).join(';')));
+  send(res, 200, '﻿' + lines.join('\r\n'), { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="penali.csv"' });
+}, A);
+route('GET', '/api/admin/outbox', (req, res) => {
+  send(res, 200, { configured: mailer.isConfigured(), from: process.env.SMTP_FROM || process.env.SMTP_USER || '', rows: db.prepare('SELECT id,to_addr,subject,kind,status,attempts,last_error,created_at,sent_at FROM outbox ORDER BY id DESC LIMIT 300').all() });
+}, A);
+route('GET', '/api/admin/outbox/:id', (req, res, ctx) => {
+  const m = db.prepare('SELECT id,to_addr,subject,html,status FROM outbox WHERE id=?').get(+ctx.params.id); need(m, 404, 'Email non trovata'); send(res, 200, m);
+}, A);
+route('POST', '/api/admin/outbox/:id/retry', (req, res, ctx) => { mailer.retry(+ctx.params.id); send(res, 200, { ok: true }); }, A);
+route('POST', '/api/admin/test-email', (req, res, ctx) => {
+  const to = str(ctx.body.to, 200) || ctx.user.email; need(EMAIL_RE.test(to), 400, 'Email non valida');
+  sendMail(to, 'test', {}); send(res, 200, { ok: true, configured: mailer.isConfigured() });
+}, A);
+route('POST', '/api/admin/users/:id/resend-confirmation', (req, res, ctx) => {
+  const u = db.prepare('SELECT u.*, c.name company_name FROM users u LEFT JOIN companies c ON c.id=u.company_id WHERE u.id=?').get(+ctx.params.id);
+  need(u && !u.email_verified, 400, 'Questo utente ha già confermato');
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare('UPDATE users SET verify_token=?, verify_expires=? WHERE id=?').run(token, Date.now() + VERIFY_HOURS * 3600e3, u.id);
+  sendMail(u.email, 'confirmRegistration', { name: u.first_name || u.name, company: u.company_name || '', link: `${BASE()}/conferma.html?token=${token}`, hours: VERIFY_HOURS });
+  send(res, 200, { ok: true });
+}, A);
+
 // ---------------------------------------------------------------- static
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8', '.pdf': 'application/pdf', '.jpg': 'image/jpeg' };
 function serveStatic(req, res, pathname) {
   if (pathname === '/') pathname = '/index.html';
   if (pathname === '/display') pathname = '/display.html';
   if (pathname === '/admin') pathname = '/admin.html';
+  if (pathname === '/registrazione') pathname = '/registrazione.html';
   const file = path.normalize(path.join(PUBLIC_DIR, pathname));
   if (!file.startsWith(PUBLIC_DIR)) return send(res, 403, 'Vietato');
   fs.readFile(file, (err, data) => {
@@ -908,6 +1307,7 @@ function serveStatic(req, res, pathname) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   try {
+    rememberBase(req);
     if (!url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
     const r = routes.find((x) => x.method === req.method && x.re.test(url.pathname));
     need(r, 404, 'Endpoint non trovato');

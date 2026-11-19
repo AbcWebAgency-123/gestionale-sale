@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="icon" type="image/png" href="brand/favicon.png">
+  <meta name="theme-color" content="#0a615f">
+  <title>Conferma — CARDO Centro Uffici</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="center-page">
+  <header class="simple-head"><img src="brand/logo-bianco.png" alt="CARDO Centro Uffici"></header>
+  <main class="center-main">
+    <div class="card card-pad confirm-card" id="box">
+      <div class="big-icon">⏳</div>
+      <h2>Verifica in corso…</h2>
+    </div>
+  </main>
+  <script src="common.js"></script>
+  <script>
+    const q = new URLSearchParams(location.search);
+    const box = $('#box');
+    const creds = (r) => `<div class="cred"><div><small>Email</small><b>${esc(r.email)}</b></div><div><small>Password</small><b class="pw-box" style="margin:6px 0 0">${esc(r.password)}</b></div></div>`;
+    (async () => {
+      try {
+        if (q.get('token')) {
+          const r = await api('/api/register/confirm', { method: 'POST', body: { token: q.get('token') } });
+          box.innerHTML = `<div class="big-icon">🎉</div><h2>Iscrizione confermata!</h2>
+            <p class="muted">Benvenuto ${esc(r.name)}${r.company ? `, ora fai parte di <b>${esc(r.company)}</b>` : ''}. Ti abbiamo inviato anche via email le credenziali:</p>
+            ${creds(r)}<p class="muted small">Annota la password: potrai cambiarla dal menu in alto a destra dopo l'accesso.</p>
+            <a class="btn btn-accent" style="width:100%;height:46px" href="index.html">Accedi e prenota</a>`;
+        } else if (q.get('reset')) {
+          const r = await api('/api/password/reset', { method: 'POST', body: { token: q.get('reset') } });
+          box.innerHTML = `<div class="big-icon">🔑</div><h2>Nuova password pronta</h2><p class="muted">Te l'abbiamo inviata anche via email.</p>${creds(r)}
+            <a class="btn btn-primary" style="width:100%;height:46px" href="index.html">Accedi</a>`;
+        } else throw new Error('Link non valido');
+        history.replaceState(null, '', 'conferma.html');
+      } catch (e) {
+        box.innerHTML = `<div class="big-icon">⚠️</div><h2>Link non valido</h2><p class="muted">${esc(e.message)}</p>
+          <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap"><a class="btn btn-ghost" href="registrazione.html">Registrati di nuovo</a><a class="btn btn-primary" href="index.html">Vai all'accesso</a></div>`;
+      }
+    })();
+  </script>
+</body>
+</html>
