@@ -10,6 +10,7 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { createMailer } = require('./lib/mailer');
 const { T, dateLong } = require('./lib/templates');
+const shelly = require('./lib/shelly');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -130,6 +131,9 @@ addColumn('users', 'gym_waiver_file', 'TEXT');
 addColumn('users', 'gym_waiver_at', 'TEXT');
 addColumn('users', 'gym_waiver_note', "TEXT DEFAULT ''");
 addColumn('rooms', 'kind', "TEXT NOT NULL DEFAULT 'sala'");
+addColumn('rooms', 'shelly_id', 'TEXT');
+addColumn('rooms', 'shelly_channel', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('bookings', 'door_opened_at', 'TEXT');
 addColumn('bookings', 'gender', 'TEXT');
 addColumn('bookings', 'reminder_sent_at', 'TEXT');
 addColumn('bookings', 'cancelled_at', 'TEXT');
@@ -163,7 +167,10 @@ const DEFAULT_SETTINGS = {
   gym_weekly_hours: '3',
   current_month_only: '1',           // le aziende prenotano solo nel mese in corso…
   next_month_open_day: '20',         // …e dal giorno 20 anche nel mese successivo
-  gym_rotation: '1',                 // palestra: niente stesso giorno e ora in due settimane consecutive             // ore di palestra a settimana per persona (vuoto/0 = illimitate)
+  gym_rotation: '1',
+  door_open_minutes_before: '5',     // la porta si apre da N minuti prima dell'inizio fino alla fine
+  door_pulse_seconds: '3',           // dopo N secondi il relè torna a riposo (0 = lo gestisce la Shelly)
+  door_counts_as_checkin: '1',       // aprire la porta conferma la presenza                 // palestra: niente stesso giorno e ora in due settimane consecutive             // ore di palestra a settimana per persona (vuoto/0 = illimitate)
   checkin_enabled_at: '',
   lobby_token: crypto.randomBytes(16).toString('hex'),
 };
@@ -630,7 +637,7 @@ function bookingView(b, user, s) {
     attendees: (isAdmin || sameCompany) ? b.attendees : undefined,
     notes: (isAdmin || sameCompany) ? b.notes : undefined,
     series_id: b.series_id, checked_in: !!b.checked_in_at, gender: b.gender || null,
-    mine: !!mine, own_company: !!sameCompany,
+    mine: !!mine, own_company: !!sameCompany, door_opened: !!b.door_opened_at,
     can_edit: !!(isAdmin || mine || (sameCompany && user.role === 'referente')),
   };
 }
@@ -638,7 +645,7 @@ const BOOKING_SELECT = `SELECT b.*, c.name company_name, u.name user_name, r.nam
   LEFT JOIN companies c ON c.id=b.company_id LEFT JOIN users u ON u.id=b.user_id JOIN rooms r ON r.id=b.room_id`;
 
 function roomsList(all = false) {
-  return db.prepare(`SELECT id,name,kind,capacity,location,equipment,color,sort_order,active${all ? ',display_token' : ''} FROM rooms ${all ? '' : 'WHERE active=1'} ORDER BY sort_order,id`).all();
+  return db.prepare(`SELECT id,name,kind,capacity,location,equipment,color,sort_order,active,(shelly_id IS NOT NULL AND shelly_id<>'') has_door${all ? ',display_token,shelly_id,shelly_channel' : ''} FROM rooms ${all ? '' : 'WHERE active=1'} ORDER BY sort_order,id`).all().map((r) => ({ ...r, has_door: !!r.has_door }));
 }
 
 // ---------------------------------------------------------------- display (tablet fuori dalle sale)
@@ -731,6 +738,7 @@ route('GET', '/api/config', (req, res, ctx) => {
     bookable_months: bookableMonths(n.date, s).months,
     next_month_open_day: parseInt(s.next_month_open_day, 10) || 0,
     gym_rotation: s.gym_rotation === '1',
+    doors: { on: shelly.configured(), before: parseInt(s.door_open_minutes_before, 10) || 0 },
     gym_weekly_hours: parseFloat(String(s.gym_weekly_hours || '').replace(',', '.')) || 0,
     gym_week: { this: +gymHoursInWeek(ctx.user.id, n.date).toFixed(2), monday: mondayOf(n.date) },
     rooms: roomsList(),
@@ -748,6 +756,35 @@ route('GET', '/api/bookings', (req, res, ctx) => {
   const s = getSettings();
   const rows = db.prepare(`${BOOKING_SELECT} WHERE b.date BETWEEN ? AND ? AND b.status='confermata' ORDER BY b.date,b.start`).all(from, to);
   send(res, 200, rows.map((b) => bookingView(b, ctx.user, s)));
+});
+// ---------------------------------------------------------------- apertura porte (Shelly)
+const doorLimiter = new Map();
+function doorRate(userId) {
+  const t = doorLimiter.get(userId) || 0;
+  need(Date.now() - t > 4000, 429, 'Attendi qualche secondo prima di riprovare');
+  doorLimiter.set(userId, Date.now());
+}
+route('POST', '/api/bookings/:id/open', async (req, res, ctx) => {
+  const s = getSettings(); const n = now();
+  const b = db.prepare(`${BOOKING_SELECT} WHERE b.id=?`).get(+ctx.params.id);
+  need(b, 404, 'Prenotazione non trovata');
+  need(b.user_id === ctx.user.id, 403, 'Solo chi ha prenotato può aprire la porta');
+  need(b.status === 'confermata', 400, 'La prenotazione non è attiva');
+  const room = db.prepare('SELECT * FROM rooms WHERE id=?').get(b.room_id);
+  need(room.shelly_id, 400, `La porta di ${room.name} non è collegata al sistema: rivolgiti alla reception`);
+  need(shelly.configured(), 503, "L'apertura delle porte non è ancora attiva: rivolgiti alla reception");
+  const before = parseInt(s.door_open_minutes_before, 10) || 0;
+  need(b.date === n.date, 400, `Puoi aprire la porta solo il giorno della prenotazione, da ${before} minuti prima dell'inizio`);
+  need(n.min >= toMin(b.start) - before, 400, `La porta si apre dalle ${toHHMM(toMin(b.start) - before)} (${before} minuti prima dell'inizio)`);
+  need(n.min < toMin(b.end), 400, 'La prenotazione è terminata');
+  doorRate(ctx.user.id);
+  try { await shelly.openDoor(room.shelly_id, room.shelly_channel, parseInt(s.door_pulse_seconds, 10) || 0); }
+  catch (e) { audit(ctx.user.id, 'porta_errore', { room: room.name, booking: b.id, error: e.message }); need(false, 502, e.message); }
+  db.prepare('UPDATE bookings SET door_opened_at=COALESCE(door_opened_at, CURRENT_TIMESTAMP) WHERE id=?').run(b.id);
+  if (s.door_counts_as_checkin === '1') db.prepare('UPDATE bookings SET checked_in_at=COALESCE(checked_in_at, CURRENT_TIMESTAMP) WHERE id=?').run(b.id);
+  audit(ctx.user.id, 'porta_aperta', { room: room.name, booking: b.id });
+  broadcast();
+  send(res, 200, { ok: true, room: room.name });
 });
 route('GET', '/api/gym/week', (req, res, ctx) => {
   const d = ctx.query.get('date'); need(isDate(d), 400, 'Data non valida');
@@ -937,8 +974,23 @@ route('GET', '/api/display/state', (req, res, ctx) => {
   const s = getSettings(); const n = now();
   const base = { building_name: s.building_name, timezone: TZ, now: n, open_time: s.open_time, close_time: s.close_time, checkin_required: s.checkin_required === '1', checkin_grace_minutes: parseInt(s.checkin_grace_minutes, 10) };
   if (a.lobby) return send(res, 200, { ...base, lobby: true, rooms: roomsList().map((r) => roomState(r, s, n)) });
-  send(res, 200, { ...base, lobby: false, ...roomState(a.room, s, n) });
+  send(res, 200, { ...base, lobby: false, ...roomState(a.room, s, n), week: roomWeek(a.room, s, n), book_url: `${BASE()}/index.html?prenota=${a.room.id}`, gym_saturday: s.gym_saturday === '1' });
 }, { public: true });
+// Settimana della sala per il monitor accanto alla porta (nel weekend mostra la settimana successiva)
+function roomWeek(room, s, n) {
+  const satOpen = room.kind === 'palestra' && s.gym_saturday === '1';
+  let mon = mondayOf(n.date);
+  const wd = weekday(n.date);
+  if (wd === 0 || (wd === 6 && !satOpen)) mon = addDays(mon, 7);
+  const days = Array.from({ length: satOpen ? 6 : 5 }, (_, i) => addDays(mon, i));
+  const closures = Object.fromEntries(db.prepare('SELECT date,reason FROM closures WHERE date BETWEEN ? AND ?').all(days[0], days[days.length - 1]).map((c) => [c.date, c.reason || 'Chiuso']));
+  const rows = db.prepare(`${BOOKING_SELECT} WHERE b.room_id=? AND b.date BETWEEN ? AND ? AND b.status='confermata' ORDER BY b.date,b.start`).all(room.id, days[0], days[days.length - 1]);
+  return {
+    days: days.map((d) => ({ date: d, closed: closures[d] || null })),
+    bookings: rows.map((b) => ({ id: b.id, date: b.date, start: b.start, end: b.end, gender: b.gender || null,
+      title: s.display_show_title === '1' ? b.title : 'Riservata', company: s.display_show_company === '1' ? (b.company_name || '') : '' })),
+  };
+}
 route('POST', '/api/display/checkin', (req, res, ctx) => {
   const a = displayAuth(ctx.body.token); need(a.room, 403, 'Solo dal display della sala');
   const n = now();
@@ -1117,12 +1169,25 @@ function roomFields(b) {
   return [name, kind === 'palestra' ? Math.min(cap, 2) : cap, str(b.location), str(b.equipment, 300), color, parseInt(b.sort_order, 10) || 0, b.active === false || b.active === 0 ? 0 : 1, kind];
 }
 route('POST', '/api/admin/rooms', (req, res, ctx) => {
-  const r = db.prepare('INSERT INTO rooms(name,capacity,location,equipment,color,sort_order,active,kind,display_token) VALUES (?,?,?,?,?,?,?,?,?)').run(...roomFields(ctx.body), crypto.randomBytes(16).toString('hex'));
+  const r = db.prepare('INSERT INTO rooms(name,capacity,location,equipment,color,sort_order,active,kind,display_token,shelly_id,shelly_channel) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(...roomFields(ctx.body), crypto.randomBytes(16).toString('hex'), ...shellyFields(ctx.body));
   audit(ctx.user.id, 'sala_creata', ctx.body.name); broadcast(); send(res, 201, { id: Number(r.lastInsertRowid) });
 }, A);
+const shellyFields = (b) => [str(b.shelly_id, 80).replace(/\s+/g, '') || null, Math.max(0, Math.min(3, parseInt(b.shelly_channel, 10) || 0))];
 route('PUT', '/api/admin/rooms/:id', (req, res, ctx) => {
   db.prepare('UPDATE rooms SET name=?,capacity=?,location=?,equipment=?,color=?,sort_order=?,active=?,kind=? WHERE id=?').run(...roomFields(ctx.body), +ctx.params.id);
+  if ('shelly_id' in ctx.body) db.prepare('UPDATE rooms SET shelly_id=?, shelly_channel=? WHERE id=?').run(...shellyFields(ctx.body), +ctx.params.id);
   audit(ctx.user.id, 'sala_modificata', ctx.params.id); broadcast(); send(res, 200, { ok: true });
+}, A);
+route('POST', '/api/admin/rooms/:id/open', async (req, res, ctx) => {
+  const room = db.prepare('SELECT * FROM rooms WHERE id=?').get(+ctx.params.id);
+  need(room, 404, 'Sala non trovata');
+  need(room.shelly_id, 400, 'Questa sala non ha una serratura Shelly collegata (impostala in Modifica)');
+  need(shelly.configured(), 503, 'Manca la configurazione Shelly Cloud: imposta SHELLY_SERVER e SHELLY_AUTH_KEY su Railway');
+  doorRate(ctx.user.id);
+  try { await shelly.openDoor(room.shelly_id, room.shelly_channel, parseInt(getSettings().door_pulse_seconds, 10) || 0); }
+  catch (e) { audit(ctx.user.id, 'porta_errore', { room: room.name, error: e.message }); need(false, 502, e.message); }
+  audit(ctx.user.id, 'porta_aperta_admin', { room: room.name });
+  send(res, 200, { ok: true });
 }, A);
 route('POST', '/api/admin/rooms/:id/token', (req, res, ctx) => {
   const t = crypto.randomBytes(16).toString('hex');
@@ -1155,7 +1220,7 @@ route('DELETE', '/api/admin/closures/:date', (req, res, ctx) => {
 }, A);
 
 const EDITABLE_SETTINGS = ['building_name', 'open_time', 'close_time', 'slot_minutes', 'max_hours_per_booking', 'max_advance_days', 'max_active_per_company', 'max_repeat_weeks', 'checkin_required', 'checkin_grace_minutes', 'show_titles_to_others', 'display_show_title', 'display_show_company',
-  'default_monthly_quota_hours', 'registration_enabled', 'registration_approval', 'gym_saturday', 'gym_weekly_hours', 'current_month_only', 'next_month_open_day', 'gym_rotation', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
+  'default_monthly_quota_hours', 'registration_enabled', 'registration_approval', 'gym_saturday', 'gym_weekly_hours', 'current_month_only', 'next_month_open_day', 'gym_rotation', 'door_open_minutes_before', 'door_pulse_seconds', 'door_counts_as_checkin', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
 route('GET', '/api/admin/settings', (req, res) => send(res, 200, { ...getSettings(), smtp_configured: mailer.isConfigured(), gym_template_custom: fs.existsSync(path.join(DATA_DIR, 'modulo-palestra.pdf')) }), A);
 route('PUT', '/api/admin/settings', (req, res, ctx) => {
   const b = ctx.body;

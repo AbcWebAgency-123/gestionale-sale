@@ -89,27 +89,7 @@ function render() {
     return `<div class="ag ${cls}"><div class="t">${it.start}<small>${it.end}</small></div><div class="w"><b>${esc(it.title)}</b><span>${esc(it.company)}</span></div></div>`;
   }).join('');
 
-  root.innerHTML = `<div class="screen s-${s}">
-    <section class="main">
-      <div class="room-label"><img class="logo" src="brand/logo-bianco.png" alt="CARDO Centro Uffici"></div>
-      <div class="room-name">${esc(room.name)}</div>
-      <div class="room-meta"><span>👥 ${room.capacity} posti</span>${room.location ? `<span>📍 ${esc(room.location)}</span>` : ''}${room.equipment ? `<span>🖥 ${esc(room.equipment)}</span>` : ''}</div>
-      <div class="status">
-        <div class="status-word">${WORD[s]}</div>
-        <div class="status-sub">${sub}</div>
-        ${meeting}
-        ${actions ? `<div class="actions">${actions}</div>` : ''}
-        <div class="footer-hint">Prenota questa sala dal tuo ufficio: <b>${esc(location.host)}</b></div>
-      </div>
-    </section>
-    <aside class="side">
-      <div class="clock" id="clock">${n.time}</div>
-      <div class="date">${dateLong(n.date)}</div>
-      <div class="agenda-title">Programma di oggi</div>
-      <div class="agenda">${agenda || '<div class="empty-day">Nessuna prenotazione oggi: la sala è libera.</div>'}</div>
-      <div class="brand"><span>${esc(st.building_name)}</span><span>Aggiornato ${n.time}</span></div>
-    </aside>
-  </div>`;
+  weekScreen({ cls: s, word: WORD[s], sub, meeting, actions });
   bindActions();
 }
 
@@ -133,18 +113,81 @@ function renderGym(n) {
     const cls = t + 60 <= n.min ? 'past' : t <= n.min ? 'now' : at.length ? '' : 'free';
     rows.push(`<div class="ag ${cls}"><div class="t">${hh(t)}<small>${hh(t + 60)}</small></div><div class="w"><span style="font-size:1.8vh;opacity:1">${g('M')}</span><span style="font-size:1.8vh;opacity:1">${g('F')}</span></div></div>`);
   }
-  root.innerHTML = `<div class="screen s-${cls}">
-    <section class="main">
-      <div class="room-label"><img class="logo" src="brand/logo-bianco.png" alt="CARDO Centro Uffici"></div>
-      <div class="room-name">🏋️ ${esc(room.name)}</div>
-      <div class="room-meta"><span>Massimo 1 uomo + 1 donna per ora</span>${room.location ? `<span>📍 ${esc(room.location)}</span>` : ''}</div>
-      <div class="status"><div class="status-word">${word}</div><div class="status-sub">${sub}</div>${people}${actions}
-        <div class="footer-hint">Prenota la palestra dal tuo ufficio: <b>${esc(location.host)}</b></div></div>
+  weekScreen({ cls, word, sub, meeting: people, actions: actions.replace(/^<div class="actions">|<\/div>$/g, '') });
+  bindActions();
+}
+
+// ---------------------------------------------------------------- monitor della sala: settimana + QR per prenotare
+let pick = null; let pickTimer = null;
+const G2 = { M: 'Uomo', F: 'Donna' };
+const hhmm = (m) => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+const GG = ['Dom', 'Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab'];
+function bookUrl() {
+  const base = st.book_url && /^https?:/.test(st.book_url) ? st.book_url : `${location.origin}/index.html?prenota=${st.room.id}`;
+  return pick ? `${base}&date=${pick.date}&start=${pick.start}` : base;
+}
+function qrSvg(text) {
+  try { const q = qrcode(0, 'M'); q.addData(text); q.make(); return q.createSvgTag({ cellSize: 4, margin: 0, scalable: true }); } catch { return ''; }
+}
+function weekScreen({ cls, word, sub, meeting, actions }) {
+  const n = clockNow(); const room = st.room; const gym = room.kind === 'palestra';
+  const w = st.week || { days: [], bookings: [] };
+  const o = toMin(st.open_time); const c = toMin(st.close_time); const span = c - o;
+  const pos = (t) => ((toMin(t) - o) / span) * 100;
+  const hours = []; for (let t = Math.ceil(o / 60) * 60; t <= c; t += 60) hours.push(t);
+  const cols = w.days.map((d) => {
+    const x = new Date(d.date + 'T12:00:00Z'); const isToday = d.date === n.date; const past = d.date < n.date;
+    const list = w.bookings.filter((b) => b.date === d.date);
+    const blocks = d.closed ? `<div class="wk-closed"><span>${esc(d.closed)}</span></div>` : list.map((b) => {
+      const ended = past || (isToday && toMin(b.end) <= n.min); const now = isToday && toMin(b.start) <= n.min && n.min < toMin(b.end);
+      const lane = gym ? (b.gender === 'F' ? 'lane-r' : 'lane-l') : '';
+      const short = toMin(b.end) - toMin(b.start) <= 60 ? 'short' : '';
+      return `<div class="wk-b ${lane} ${short} ${ended ? 'past' : ''} ${now ? 'now' : ''}" style="top:${pos(b.start)}%;height:${pos(b.end) - pos(b.start)}%">
+        ${gym ? `<b>${b.start.slice(0, 2)}–${b.end.slice(0, 2)}</b><span>${G2[b.gender] || ''}</span>` : `<b>${b.start}–${b.end}</b><span>${esc(b.company || b.title)}</span>`}${!gym && b.company && b.title && b.title !== 'Riservata' ? `<em>${esc(b.title)}</em>` : ''}</div>`;
+    }).join('');
+    const pastShade = past ? 100 : isToday ? Math.max(0, Math.min(100, ((n.min - o) / span) * 100)) : 0;
+    const sel = pick && pick.date === d.date ? `<div class="wk-pick" style="top:${pos(pick.start)}%;height:${pos(pick.end) - pos(pick.start)}%"><b>${pick.start}</b></div>` : '';
+    return `<div class="wk-col ${isToday ? 'today' : ''} ${d.closed ? 'closed' : ''}" data-date="${d.date}">
+      <div class="wk-day"><span>${GG[x.getUTCDay()]}</span><b>${x.getUTCDate()}</b>${gym && !d.closed ? '<div class="wk-lanes"><span>U</span><span>D</span></div>' : ''}</div>
+      <div class="wk-body">${hours.map((t) => `<i class="wk-hl" style="top:${((t - o) / span) * 100}%"></i>`).join('')}
+        ${pastShade ? `<div class="wk-past" style="height:${pastShade}%"></div>` : ''}
+        ${blocks}${sel}
+        ${isToday && n.min >= o && n.min <= c ? `<div class="wk-now" style="top:${((n.min - o) / span) * 100}%"></div>` : ''}</div></div>`;
+  }).join('');
+  const first = w.days[0]; const last = w.days[w.days.length - 1];
+  const range = first ? `${new Date(first.date + 'T12:00:00Z').getUTCDate()} – ${dateLong(last.date).replace(/^\S+ /, '')}` : '';
+  root.innerHTML = `<div class="wk">
+    <section class="wk-main">
+      <header class="wk-head"><img class="logo" src="brand/logo-bianco.png" alt="CARDO Centro Uffici">
+        <div class="wk-title"><h1>${gym ? '🏋️ ' : ''}${esc(room.name)}</h1><span>${gym ? 'Massimo 1 uomo + 1 donna per ora' : `👥 ${room.capacity} posti`}${room.location ? ' · ' + esc(room.location) : ''} · Settimana ${range}</span></div></header>
+      <div class="wk-grid" style="--n:${w.days.length};grid-template-columns:7vh repeat(${w.days.length}, 1fr)">
+        <div class="wk-axis"><div class="wk-day"></div><div class="wk-body">${hours.map((t) => `<span style="top:${((t - o) / span) * 100}%">${hhmm(t)}</span>`).join('')}</div></div>
+        ${cols}
+      </div>
     </section>
-    <aside class="side"><div class="clock" id="clock">${n.time}</div><div class="date">${dateLong(n.date)}</div>
-      <div class="agenda-title">Ingressi di oggi</div><div class="agenda">${st.open ? rows.slice(0, 7).join('') : '<div class="empty-day">Oggi la palestra è chiusa.</div>'}</div>
-      <div class="brand"><span>${esc(st.building_name)}</span><span>Aggiornato ${n.time}</span></div></aside>
+    <aside class="wk-side s-${cls}">
+      <div class="clock" id="clock">${n.time}</div><div class="date">${dateLong(n.date)}</div>
+      <div class="wk-status"><div class="wk-word">${word}</div><div class="status-sub">${sub}</div></div>
+      ${meeting}
+      ${actions ? `<div class="actions">${actions}</div>` : ''}
+      <div class="wk-qr"><div class="qr">${qrSvg(bookUrl())}</div>
+        <div><b>${pick ? `Prenota ${GG[new Date(pick.date + 'T12:00:00Z').getUTCDay()].toLowerCase()} ${Number(pick.date.slice(8))} alle ${pick.start}` : `Prenota ${gym ? 'la palestra' : 'questa sala'}`}</b>
+        <span>Inquadra il codice con il telefono e accedi: ${pick ? 'trovi già giorno e orario scelti.' : 'trovi già la sala selezionata.'}${'ontouchstart' in window && !pick ? ' Oppure tocca uno spazio libero nel calendario.' : ''}</span></div></div>
+    </aside>
   </div>`;
+  // tocco su uno spazio libero: QR con giorno e ora già impostati
+  document.querySelectorAll('.wk-col:not(.closed) .wk-body').forEach((el) => (el.onclick = (e) => {
+    const date = el.parentElement.dataset.date; const r = el.getBoundingClientRect();
+    const step = gym ? 60 : 30;
+    let m = o + Math.floor((((e.clientY - r.top) / r.height) * span) / step) * step;
+    m = Math.max(o, Math.min(c - step, m));
+    if (date < n.date || (date === n.date && m + step <= n.min)) return;
+    const start = hhmm(m); const end = hhmm(m + (gym ? 60 : 60 <= c - m ? 60 : 30));
+    const list = w.bookings.filter((b) => b.date === date && toMin(b.start) < m + step && toMin(b.end) > m);
+    if (gym ? list.length >= 2 : list.length) return;
+    pick = { date, start, end }; render();
+    clearTimeout(pickTimer); pickTimer = setTimeout(() => { pick = null; render(); }, 60000);
+  }));
   bindActions();
 }
 

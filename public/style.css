@@ -528,3 +528,14 @@ body.center-page { min-height: 100vh; display: flex; flex-direction: column; bac
   .mc-room i, .mc-room span { display: none; }
   .mc-room em { height: 4px; }
 }
+
+/* apertura porte */
+.door-banner { display: flex; align-items: center; gap: 16px; padding: 14px 18px; margin-bottom: 14px; border-radius: 16px; background: #fff; border: 1px solid var(--line); box-shadow: 0 6px 20px rgba(7,75,73,.06); }
+.door-banner.ready { background: linear-gradient(100deg, #0a615f, #074b49); color: #fff; border-color: transparent; }
+.door-banner .door-ic { font-size: 28px; }
+.door-banner .door-txt { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.door-banner .door-txt span { font-size: 13px; opacity: .85; }
+.door-banner.ready .btn-accent { font-size: 15px; padding: 12px 22px; }
+.door-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.field-group { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 4px; margin: 6px 0 12px; background: var(--surface-2, #faf8f4); }
+@media (max-width: 640px) { .door-banner { flex-wrap: wrap; } .door-banner .btn { width: 100%; } }

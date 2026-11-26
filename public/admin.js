@@ -326,6 +326,7 @@ async function sale() {
         <div class="small" style="margin-top:14px;font-weight:600">Link del display</div>
         <div class="link-box"><input readonly value="${link(r.display_token)}"><button class="btn btn-ghost btn-sm" data-copy="${link(r.display_token)}">Copia</button><a class="btn btn-ghost btn-sm" target="_blank" href="${link(r.display_token)}">Apri</a></div>
         <button class="btn btn-ghost btn-sm" style="margin-top:10px" data-token="${r.id}">Rigenera link</button>
+        <div class="door-row">${r.shelly_id ? `<span class="small">🔓 Serratura collegata <span class="muted">· ${esc(r.shelly_id)} · canale ${r.shelly_channel || 0}</span></span><button class="btn btn-accent btn-sm" data-open="${r.id}">Apri porta</button>` : '<span class="small muted">🔒 Serratura Shelly non collegata · imposta l\'ID in Modifica</span>'}</div>
       </div>`).join('')}
       <div class="card room-card" style="border-top-color:#0f172a">
         <h3>Display atrio / reception</h3><p class="muted small" style="margin:0">Mostra lo stato di tutte le sale su un unico schermo, ideale all'ingresso o agli ascensori.</p>
@@ -341,6 +342,13 @@ async function sale() {
       <li>Se un tablet viene smarrito o rubato, premi <b>Rigenera link</b>: il vecchio indirizzo smetterà di funzionare.</li></ol></div>`;
   $$('[data-copy]').forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copy); toast('Link copiato'); } catch { b.previousElementSibling.select(); document.execCommand('copy'); toast('Link copiato'); } }));
   $$('[data-edit]').forEach((b) => (b.onclick = () => roomModal(rooms.find((r) => r.id === +b.dataset.edit))));
+  $$('[data-open]').forEach((b) => (b.onclick = async () => {
+    const r = rooms.find((x) => x.id === +b.dataset.open);
+    if (!await confirmBox(`Aprire la porta di ${r.name}?`, 'La serratura si sbloccherà subito. L\'apertura viene registrata nel registro attività.', { okText: 'Apri porta' })) return;
+    b.disabled = true; const t = b.textContent; b.textContent = 'Apertura…';
+    try { await api(`/api/admin/rooms/${r.id}/open`, { method: 'POST', body: {} }); toast(`🔓 Porta di ${r.name} aperta`); } catch (e) { toast(e.message, 'err'); }
+    b.disabled = false; b.textContent = t;
+  }));
   $$('[data-rm]').forEach((b) => (b.onclick = () => { const r = rooms.find((x) => x.id === +b.dataset.rm);
     hardDelete(`/api/admin/rooms/${r.id}`, 'Eliminare la sala?', `<b>${esc(r.name)}</b><br><br>Verranno eliminate anche <b>tutte le sue prenotazioni</b>, passate e future, e il tablet della sala smetterà di funzionare. Per fermarla solo temporaneamente usa Modifica → togli “Sala prenotabile”.`, async () => { CFG = await api('/api/config'); sale(); }, 'Sala eliminata'); }));
   $$('[data-token]').forEach((b) => (b.onclick = async () => { if (!await confirmBox('Rigenerare il link?', 'Il tablet attuale di questa sala smetterà di funzionare finché non imposti il nuovo link.', { okText: 'Rigenera' })) return; await api(`/api/admin/rooms/${b.dataset.token}/token`, { method: 'POST', body: {} }); toast('Nuovo link generato'); sale(); }));
@@ -356,6 +364,9 @@ function roomModal(r) {
       <label class="field"><span>Ubicazione</span><input name="location" value="${esc(r.location)}" placeholder="Es. Primo piano, lato ascensori"></label>
       <label class="field"><span>Dotazioni</span><input name="equipment" value="${esc(r.equipment)}" placeholder="Es. Schermo 65&quot;, videoconferenza, lavagna"></label>
       <div class="row"><label class="field"><span>Colore</span><input type="color" name="color" value="${r.color}"></label><label class="field"><span>Ordine di visualizzazione</span><input type="number" name="sort_order" value="${r.sort_order}"></label></div>
+      <div class="field-group"><b style="font-size:13.5px">🔓 Serratura Shelly della porta</b>
+        <div class="row"><label class="field"><span>ID dispositivo Shelly</span><input name="shelly_id" value="${esc(r.shelly_id || '')}" placeholder="Es. a8032ab12345" autocomplete="off"><small>Nell'app Shelly: dispositivo → Impostazioni → Informazioni dispositivo. Vuoto = porta non collegata.</small></label>
+        <label class="field" style="max-width:130px"><span>Canale</span><input type="number" min="0" max="3" name="shelly_channel" value="${r.shelly_channel || 0}"><small>Di solito 0</small></label></div></div>
       <label class="check"><input type="checkbox" name="active" ${r.active ? 'checked' : ''}><span><b>Sala prenotabile</b><small>Togli la spunta per lavori o manutenzione prolungata.</small></span></label>
       <div class="form-error" id="err"></div>
     </form>
@@ -426,6 +437,13 @@ async function impostazioni() {
         <label class="field"><span>Email che riceve gli avvisi delle iscrizioni da approvare</span><input type="email" name="admin_notify_email" value="${esc(s.admin_notify_email)}" placeholder="es. info@ufficicardo.com"></label>
         <label class="field"><span>Email che riceve i moduli della palestra</span><input type="email" name="gym_waiver_email" value="${esc(s.gym_waiver_email)}" required></label>
         ${chk('gym_saturday', 'Palestra prenotabile anche il sabato', 'Stessi orari dei giorni feriali. Le sale riunioni restano dal lunedì al venerdì.')}
+        <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+        <b style="font-size:13.5px">🔓 Apertura porte (Shelly)</b>
+        <p class="muted small" style="margin:4px 0 10px">${CFG.doors && CFG.doors.on ? '✅ Collegamento al cloud Shelly configurato.' : '⚠️ Non ancora attivo: servono le variabili SHELLY_SERVER e SHELLY_AUTH_KEY su Railway.'} Solo chi ha prenotato può aprire la porta della propria sala.</p>
+        <div class="row"><label class="field"><span>Minuti prima dell'inizio</span><input type="number" min="0" max="60" name="door_open_minutes_before" value="${esc(s.door_open_minutes_before)}"><small>Da quando si può aprire. Fino alla fine della prenotazione.</small></label>
+        <label class="field"><span>Durata impulso (secondi)</span><input type="number" min="0" max="30" name="door_pulse_seconds" value="${esc(s.door_pulse_seconds)}"><small>Dopo quanto il relè torna a riposo. 0 se la Shelly ha già lo spegnimento automatico.</small></label></div>
+        ${chk('door_counts_as_checkin', 'Aprire la porta conferma la presenza', 'Chi apre la porta non deve fare il check-in sul tablet e non rischia la penale per mancato utilizzo.')}
+        <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
         ${chk('gym_rotation', 'Rotazione degli orari in palestra', 'Una persona non può prenotare lo stesso giorno alla stessa ora in due settimane consecutive, così tutti possono usare ogni fascia.')}
         <label class="field"><span>Ore di palestra a settimana per persona</span><input type="number" min="0" step="1" name="gym_weekly_hours" value="${esc(s.gym_weekly_hours)}"><small>0 = nessun limite. La settimana va dal lunedì alla domenica.</small></label>
         <label class="field"><span>Regola di accesso alla palestra</span><select name="gym_rule">${[['uno_per_sesso', 'Massimo 1 uomo + 1 donna per ora'], ['stesso_sesso', 'Massimo 2 persone dello stesso sesso per ora'], ['misto', 'Fino alla capienza, senza distinzione']].map(([v, l]) => `<option value="${v}" ${s.gym_rule === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
@@ -444,7 +462,7 @@ async function impostazioni() {
   $('#f').onsubmit = async (e) => {
     e.preventDefault();
     const d = Object.fromEntries(new FormData(e.target));
-    for (const k of ['checkin_required', 'show_titles_to_others', 'display_show_title', 'display_show_company', 'penalties_enabled', 'reminders_enabled', 'registration_enabled', 'registration_approval', 'gym_saturday', 'current_month_only', 'gym_rotation']) d[k] = d[k] ? '1' : '0';
+    for (const k of ['checkin_required', 'show_titles_to_others', 'display_show_title', 'display_show_company', 'penalties_enabled', 'reminders_enabled', 'registration_enabled', 'registration_approval', 'gym_saturday', 'current_month_only', 'gym_rotation', 'door_counts_as_checkin']) d[k] = d[k] ? '1' : '0';
     try { await api('/api/admin/settings', { method: 'PUT', body: d }); CFG = await api('/api/config'); toast('Impostazioni salvate'); }
     catch (err) { toast(err.message, 'err'); }
   };

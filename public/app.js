@@ -43,6 +43,44 @@ function monthLockBanner(m) {
     ? `<div class="quota-banner">🔒 ${openDayMsg(m)}${state.cfg.next_month_open_day ? ` Il mese successivo diventa prenotabile ogni mese dal giorno ${state.cfg.next_month_open_day}.` : ''}</div>`
     : `<div class="quota-banner" style="background:var(--surface-2,#f1efe9);color:var(--text-2,#4a5856);border-color:var(--line)">Stai guardando un mese passato.</div>`;
 }
+// ---------------------------------------------------------------- apertura porte
+const roomById = (id) => state.cfg.rooms.find((r) => r.id === id);
+function doorWindow(b) {
+  const r = roomById(b.room_id); const n = nowLocal();
+  if (!state.cfg.doors || !state.cfg.doors.on || !r || !r.has_door || !b.mine || b.status !== 'confermata' || b.date !== n.date) return null;
+  const from = toMin(b.start) - state.cfg.doors.before;
+  if (n.min >= toMin(b.end)) return null;
+  return { open: n.min >= from, from: toHHMM(from), room: r };
+}
+async function openDoor(b, btn) {
+  const w = doorWindow(b); if (!w) return;
+  if (!w.open) return toast(`La porta di ${w.room.name} si apre dalle ${w.from}`, 'err');
+  const label = btn && btn.innerHTML; if (btn) { btn.disabled = true; btn.innerHTML = 'Apertura…'; }
+  try {
+    await api(`/api/bookings/${b.id}/open`, { method: 'POST', body: {} });
+    toast(`🔓 Porta di ${w.room.name} aperta`);
+    if (btn) { btn.innerHTML = '✓ Porta aperta'; setTimeout(() => { btn.disabled = false; btn.innerHTML = label; }, 5000); }
+  } catch (e) { toast(e.message, 'err'); if (btn) { btn.disabled = false; btn.innerHTML = label; } }
+}
+let doorTimer = null;
+async function renderDoorBanner() {
+  const el = $('#door-banner'); if (!el) return;
+  if (!state.cfg.doors || !state.cfg.doors.on || state.me.role === 'admin' && !state.cfg.rooms.some((r) => r.has_door)) { el.innerHTML = ''; return; }
+  let list = [];
+  try { list = (await api('/api/bookings/mine?scope=mine&past=0')).bookings; } catch { return; }
+  const n = nowLocal();
+  const today = list.filter((b) => doorWindow(b)).sort((a, b) => a.start.localeCompare(b.start));
+  // mostra la prenotazione in corso o la prossima di oggi entro 60 minuti
+  const b = today.find((x) => doorWindow(x).open) || today.find((x) => toMin(x.start) - n.min <= 60);
+  if (!b) { el.innerHTML = ''; return; }
+  const w = doorWindow(b);
+  el.innerHTML = `<div class="door-banner ${w.open ? 'ready' : ''}"><div class="door-ic">${w.open ? '🔓' : '🔒'}</div>
+    <div class="door-txt"><b>${esc(w.room.name)} · ${b.start}–${b.end}</b><span>${w.open ? 'La tua prenotazione è attiva: puoi aprire la porta.' : `Potrai aprire la porta dalle ${w.from}.`}</span></div>
+    <button class="btn ${w.open ? 'btn-accent' : 'btn-ghost'}" id="door-btn" ${w.open ? '' : 'disabled'}>🔓 Apri porta</button></div>`;
+  $('#door-btn').onclick = (e) => openDoor(b, e.currentTarget);
+}
+function startDoorTimer() { clearInterval(doorTimer); renderDoorBanner(); doorTimer = setInterval(renderDoorBanner, 30000); }
+
 function nextWorkday(d, dir = 1) { let x = d; for (let i = 0; i < 30; i++) { if (!offDay(x)) return x; x = addDays(x, dir); } return x; }
 const mondayOf = (d) => addDays(d, -((weekday(d) + 6) % 7));
 function firstBookableDay() {
@@ -95,15 +133,28 @@ async function init() {
   state.month = state.date.slice(0, 7);
   window.addEventListener('hashchange', route);
   route();
+  deepLinkBooking();
   liveUpdates('/api/events', async () => { await refreshCfg(); try { state.me = await api('/api/me'); } catch { /* */ } if (location.hash === '#mie') renderMine(); else refreshCal(); });
   setInterval(() => { if (location.hash !== '#mie' && state.view === 'giorno') renderGrid(); }, 60000);
+}
+// link dal QR del monitor della sala: index.html?prenota=<id sala>&date=AAAA-MM-GG&start=HH:MM
+function deepLinkBooking() {
+  const q = new URLSearchParams(location.search);
+  const id = +q.get('prenota'); if (!id) return;
+  history.replaceState(null, '', location.pathname + location.hash);
+  const r = state.cfg.rooms.find((x) => x.id === id); if (!r) return toast('Sala non disponibile', 'err');
+  if (isReception(r) && state.me.role !== 'admin') return receptionInfo(r);
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(q.get('date') || '') ? q.get('date') : nowLocal().date;
+  const start = /^\d{2}:\d{2}$/.test(q.get('start') || '') ? q.get('start') : '';
+  state.date = d; state.month = d.slice(0, 7); state.view = 'giorno'; refreshCal();
+  setTimeout(() => (isGym(r) ? gymFlow({ date: d, start }) : bookingModal({ room_id: r.id, date: d, start, end: start ? toHHMM(Math.min(toMin(start) + 60, toMin(state.cfg.close_time))) : '' })), 300);
 }
 function route() {
   const mine = location.hash === '#mie';
   $('#view-calendario').classList.toggle('hidden', mine);
   $('#view-mie').classList.toggle('hidden', !mine);
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === (mine ? 'mie' : 'calendario')));
-  if (mine) renderMine(); else { renderCalendarShell(); refreshCal(); }
+  if (mine) renderMine(); else { renderCalendarShell(); refreshCal(); startDoorTimer(); }
 }
 
 function showLogin() {
@@ -148,6 +199,7 @@ function renderCalendarShell() {
       ${state.cfg.rooms.some(isGym) ? '<button class="btn btn-ghost" id="new-gym">🏋️ Palestra</button>' : ''}
       <button class="btn btn-accent" id="new-bk">${ICON.plus} Nuova prenotazione</button>
     </div>
+    <div id="door-banner"></div>
     <div id="quota-banner"></div>
     <div id="month-banner"></div>
     <div id="month-wrap" class="hidden"></div>
@@ -531,6 +583,7 @@ async function renderMine() {
             <div class="bk-time">${b.start} – ${b.end}<small>${esc(r.name)}</small></div>
             <div class="bk-main"><b>${esc(b.title)}${b.gender && isGym(r) ? ' · ' + GENDER[b.gender] : ''} ${statusTag(b)}</b><small>${[b.attendees && !isGym(r) ? b.attendees + ' partecipanti' : '', mineState.scope === 'company' ? 'Prenotata da ' + esc(b.user_name || '') : esc(b.notes || '')].filter(Boolean).join(' · ')}</small></div>
             <div class="bk-actions">
+              ${doorWindow(b) ? `<button class="btn ${doorWindow(b).open ? 'btn-accent' : 'btn-ghost'} btn-sm" data-door="${b.id}" title="${doorWindow(b).open ? 'Apri la porta della sala' : 'Disponibile dalle ' + doorWindow(b).from}">🔓 Apri porta</button>` : ''}
               ${b.status === 'confermata' ? `<a class="btn btn-ghost btn-sm" href="/api/bookings/${b.id}/ics" title="Aggiungi al tuo calendario (Outlook, Google, Apple)">${ICON.cal} Calendario</a>` : ''}
               ${b.can_edit && !ended && b.status === 'confermata' ? `${isGym(r) ? '' : `<button class="btn btn-ghost btn-sm" data-edit="${b.id}">${ICON.edit} Modifica</button>`}<button class="btn btn-danger-ghost btn-sm" data-del="${b.id}" title="Annulla">${ICON.trash}</button>` : ''}
             </div>
@@ -552,10 +605,12 @@ async function renderMine() {
           ${state.cfg.current_month_only ? `<li>Si prenota nel <b>mese in corso</b>${state.cfg.next_month_open_day ? `; dal giorno <b>${state.cfg.next_month_open_day}</b> si apre anche il mese successivo` : ''}.</li>` : `<li>Prenotazione fino a ${state.cfg.max_advance_days} giorni in anticipo.</li>`}
           ${q && q.limit != null ? `<li>Ogni azienda ha <b>${fmtHours(q.limit)} di sala al mese</b>; superata la soglia non si può più prenotare fino al mese successivo.</li>` : ''}
           ${state.cfg.checkin_required ? `<li>Conferma la presenza sul tablet della sala entro <b>${state.cfg.checkin_grace_minutes} minuti</b> dall'inizio, altrimenti la sala viene liberata.</li>` : ''}
+          ${state.cfg.doors && state.cfg.doors.on && state.cfg.rooms.some((r) => r.has_door) ? `<li>Apri la porta della sala con il pulsante <b>🔓 Apri porta</b> da ${state.cfg.doors.before} minuti prima dell'inizio: lo può fare solo chi ha prenotato.</li>` : ''}
           <li>Riceverai un'<b>email di promemoria</b> 24 ore prima.</li>
           ${state.cfg.penalties && state.cfg.penalties.on ? `<li>Annulla con almeno <b>${state.cfg.penalties.notice} ore</b> di preavviso: in caso di mancato utilizzo o annullamento tardivo è prevista una <b>penale di ${euro(state.cfg.penalties.amount)}</b>.</li>` : '<li>Se non ti serve più, <b>annulla</b> la prenotazione: libererai la sala per gli altri.</li>'}</ul></div>
       </aside>
     </div>`;
+  $$('[data-door]').forEach((x) => (x.onclick = () => openDoor(data.bookings.find((b) => b.id === +x.dataset.door), x)));
   $$('#seg-scope button').forEach((b) => b.onclick = () => { mineState.scope = b.dataset.v; renderMine(); });
   $$('#seg-time button').forEach((b) => b.onclick = () => { mineState.past = b.dataset.v === '1'; renderMine(); });
   $('#mine-new').onclick = () => bookingModal({ date: firstBookableDay() });
