@@ -160,7 +160,8 @@ const DEFAULT_SETTINGS = {
   gym_waiver_email: 'info@ufficicardo.com',
   registration_approval: '1',        // ogni iscrizione va approvata dall'amministrazione
   gym_saturday: '1',                 // la palestra è prenotabile anche il sabato
-  gym_weekly_hours: '3',             // ore di palestra a settimana per persona (vuoto/0 = illimitate)
+  gym_weekly_hours: '3',
+  current_month_only: '1',           // le aziende prenotano solo nel mese in corso             // ore di palestra a settimana per persona (vuoto/0 = illimitate)
   checkin_enabled_at: '',
   lobby_token: crypto.randomBytes(16).toString('hex'),
 };
@@ -469,6 +470,11 @@ function bookingWindowIssues({ date, start, end }, s, { isAdmin = false, ignoreP
     // si può prenotare lo slot in corso, ma non uno già finito
     if (date === n.date && a < n.min - s.slot) return "L'orario di inizio è già passato";
   }
+  if (!isAdmin && s.current_month_only === '1' && date.slice(0, 7) !== n.date.slice(0, 7)) {
+    const mese = MESI_IT[parseInt(n.date.slice(5, 7), 10) - 1];
+    const dopo = MESI_IT[parseInt(date.slice(5, 7), 10) - 1];
+    return date > n.date ? `Puoi prenotare solo nel mese in corso (${mese}). Le prenotazioni di ${dopo} si aprono il 1° ${dopo}.` : 'Non è possibile prenotare nel passato';
+  }
   if (!isAdmin && s.maxAdvance && daysBetween(n.date, date) > s.maxAdvance) return `Si può prenotare al massimo ${s.maxAdvance} giorni in anticipo`;
   return null;
 }
@@ -697,6 +703,7 @@ route('GET', '/api/config', (req, res, ctx) => {
     penalties: penaltyCfg(),
     gym_rule: s.gym_rule,
     gym_saturday: s.gym_saturday === '1',
+    current_month_only: s.current_month_only === '1',
     gym_weekly_hours: parseFloat(String(s.gym_weekly_hours || '').replace(',', '.')) || 0,
     gym_week: { this: +gymHoursInWeek(ctx.user.id, n.date).toFixed(2), monday: mondayOf(n.date) },
     rooms: roomsList(),
@@ -1115,7 +1122,7 @@ route('DELETE', '/api/admin/closures/:date', (req, res, ctx) => {
 }, A);
 
 const EDITABLE_SETTINGS = ['building_name', 'open_time', 'close_time', 'slot_minutes', 'max_hours_per_booking', 'max_advance_days', 'max_active_per_company', 'max_repeat_weeks', 'checkin_required', 'checkin_grace_minutes', 'show_titles_to_others', 'display_show_title', 'display_show_company',
-  'default_monthly_quota_hours', 'registration_enabled', 'registration_approval', 'gym_saturday', 'gym_weekly_hours', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
+  'default_monthly_quota_hours', 'registration_enabled', 'registration_approval', 'gym_saturday', 'gym_weekly_hours', 'current_month_only', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
 route('GET', '/api/admin/settings', (req, res) => send(res, 200, { ...getSettings(), smtp_configured: mailer.isConfigured(), gym_template_custom: fs.existsSync(path.join(DATA_DIR, 'modulo-palestra.pdf')) }), A);
 route('PUT', '/api/admin/settings', (req, res, ctx) => {
   const b = ctx.body;

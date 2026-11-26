@@ -1,5 +1,5 @@
 /* Pagina di prenotazione per gli utenti delle aziende */
-const state = { me: null, cfg: null, date: null, week: [], bookings: [], companies: [] };
+const state = { me: null, cfg: null, date: null, week: [], bookings: [], companies: [], view: 'mese', month: null, monthBookings: [] };
 
 const ICON = {
   people: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.3-5.5 6.5-5.5s5.9 1.9 6.5 5.5M16 4.5a3.5 3.5 0 0 1 0 7M18.5 14.8c1.7.8 2.8 2.5 3 5.2"/></svg>',
@@ -24,6 +24,19 @@ const offDay = (d) => weekday(d) === 0 || (weekday(d) === 6 && !satOpen());
 const isSaturday = (d) => weekday(d) === 6;
 const isClosed = (d) => offDay(d) || state.cfg.closures.some((c) => c.date === d);
 const closureReason = (d) => (state.cfg.closures.find((c) => c.date === d) || {}).reason;
+// prenotazioni consentite solo nel mese in corso (gli amministratori non hanno il vincolo)
+const curMonth = () => nowLocal().date.slice(0, 7);
+const lockedMonth = () => !!(state.cfg.current_month_only && state.me.role !== 'admin');
+const inBookableMonth = (d) => !lockedMonth() || d.slice(0, 7) === curMonth();
+const monthName = (m) => MESI[+m.slice(5, 7) - 1];
+const lastOfMonth = (m) => { const [y, mm] = m.split('-').map(Number); return `${m}-${String(new Date(Date.UTC(y, mm, 0)).getUTCDate()).padStart(2, '0')}`; };
+const addMonths = (m, k) => { const [y, mm] = m.split('-').map(Number); const x = new Date(Date.UTC(y, mm - 1 + k, 1)); return x.toISOString().slice(0, 7); };
+function monthLockBanner(m) {
+  if (!lockedMonth() || m === curMonth()) return '';
+  return m > curMonth()
+    ? `<div class="quota-banner">🔒 Le prenotazioni di ${monthName(m)} si aprono il 1° ${monthName(m)}: puoi prenotare solo nel mese in corso (${monthName(curMonth())}).</div>`
+    : `<div class="quota-banner" style="background:var(--surface-2,#f1efe9);color:var(--text-2,#4a5856);border-color:var(--line)">Stai guardando un mese passato.</div>`;
+}
 function nextWorkday(d, dir = 1) { let x = d; for (let i = 0; i < 30; i++) { if (!offDay(x)) return x; x = addDays(x, dir); } return x; }
 const mondayOf = (d) => addDays(d, -((weekday(d) + 6) % 7));
 function firstBookableDay() {
@@ -72,17 +85,19 @@ async function init() {
   renderTopbar(state.me, location.hash === '#mie' ? 'mie' : 'calendario', state.cfg.building_name);
   $('#app').classList.remove('hidden');
   state.date = firstBookableDay();
+  if (lockedMonth() && !inBookableMonth(state.date)) state.date = nowLocal().date;
+  state.month = state.date.slice(0, 7);
   window.addEventListener('hashchange', route);
   route();
-  liveUpdates('/api/events', async () => { await refreshCfg(); try { state.me = await api('/api/me'); } catch { /* */ } if (location.hash === '#mie') renderMine(); else loadDay(); });
-  setInterval(() => { if (location.hash !== '#mie') renderGrid(); }, 60000);
+  liveUpdates('/api/events', async () => { await refreshCfg(); try { state.me = await api('/api/me'); } catch { /* */ } if (location.hash === '#mie') renderMine(); else refreshCal(); });
+  setInterval(() => { if (location.hash !== '#mie' && state.view === 'giorno') renderGrid(); }, 60000);
 }
 function route() {
   const mine = location.hash === '#mie';
   $('#view-calendario').classList.toggle('hidden', mine);
   $('#view-mie').classList.toggle('hidden', !mine);
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === (mine ? 'mie' : 'calendario')));
-  if (mine) renderMine(); else { renderCalendarShell(); loadDay(); }
+  if (mine) renderMine(); else { renderCalendarShell(); refreshCal(); }
 }
 
 function showLogin() {
@@ -114,10 +129,11 @@ function renderCalendarShell() {
   $('#view-calendario').innerHTML = `
     <div class="cal-toolbar">
       <div class="cal-title" id="cal-title"></div>
+      <div class="seg" id="seg-view"><button data-v="mese">Mese</button><button data-v="giorno">Giorno</button></div>
       <div class="nav-group">
-        <button class="icon-btn" id="prev" title="Giorno precedente">${ICON.left}</button>
+        <button class="icon-btn" id="prev" title="Precedente">${ICON.left}</button>
         <button class="btn btn-ghost btn-sm" id="today">Oggi</button>
-        <button class="icon-btn" id="next" title="Giorno successivo">${ICON.right}</button>
+        <button class="icon-btn" id="next" title="Successivo">${ICON.right}</button>
       </div>
       <div class="week-strip" id="week"></div>
       <input type="date" class="date-input" id="pick-date" title="Vai a una data">
@@ -127,21 +143,78 @@ function renderCalendarShell() {
       <button class="btn btn-accent" id="new-bk">${ICON.plus} Nuova prenotazione</button>
     </div>
     <div id="quota-banner"></div>
-    <div class="card grid-card"><div class="grid-scroll" id="grid-wrap"></div></div>
+    <div id="month-banner"></div>
+    <div id="month-wrap" class="hidden"></div>
+    <div id="day-wrap"><div class="card grid-card"><div class="grid-scroll" id="grid-wrap"></div></div>
     <div class="legend">
       <span><i style="background:var(--primary);border-color:var(--primary)"></i>Prenotazioni della tua azienda</span>
       <span><i style="background:#e6f1ef;border-color:#b5d4d0"></i>Prenotate da altre aziende</span>
       <span><i style="background:repeating-linear-gradient(-45deg,#fafbfd,#fafbfd 3px,#eceff5 3px,#eceff5 6px);border-color:var(--line)"></i>Orario passato</span>
       <span style="margin-left:auto">Suggerimento: clicca su uno spazio libero, oppure trascina per scegliere più mezz'ore. In palestra si prenota un'ora alla volta.</span>
-    </div>`;
-  $('#prev').onclick = () => { let d = addDays(state.date, -1); while (offDay(d)) d = addDays(d, -1); go(d); };
-  $('#next').onclick = () => { let d = addDays(state.date, 1); while (offDay(d)) d = addDays(d, 1); go(d); };
-  $('#today').onclick = () => go(nextWorkday(nowLocal().date));
-  $('#pick-date').onchange = (e) => e.target.value && go(nextWorkday(e.target.value));
+    </div></div>`;
+  const step = (dir) => {
+    if (state.view === 'mese') { state.month = addMonths(state.month, dir); return refreshCal(); }
+    let d = addDays(state.date, dir); while (offDay(d)) d = addDays(d, dir); go(d);
+  };
+  $('#prev').onclick = () => step(-1);
+  $('#next').onclick = () => step(1);
+  $('#today').onclick = () => { const t = nowLocal().date; state.month = t.slice(0, 7); go(nextWorkday(t)); };
+  $('#pick-date').onchange = (e) => { if (!e.target.value) return; state.view = 'giorno'; go(nextWorkday(e.target.value)); };
+  $$('#seg-view button').forEach((b) => (b.onclick = () => { state.view = b.dataset.v; if (state.view === 'mese') state.month = state.date.slice(0, 7); refreshCal(); }));
   $('#new-bk').onclick = () => bookingModal({ date: state.date });
   $('#new-gym')?.addEventListener('click', () => gymFlow({ date: state.date }));
 }
-function go(d) { state.date = d; loadDay(); }
+function go(d) { state.date = d; state.month = d.slice(0, 7); refreshCal(); }
+function refreshCal() {
+  if (!$('#grid-wrap')) return;
+  const month = state.view === 'mese';
+  $$('#seg-view button').forEach((b) => b.classList.toggle('active', b.dataset.v === state.view));
+  $('#month-wrap').classList.toggle('hidden', !month);
+  $('#day-wrap').classList.toggle('hidden', month);
+  $('#week').classList.toggle('hidden', month);
+  $('#pick-date').classList.toggle('hidden', month);
+  return month ? loadMonth() : loadDay();
+}
+
+/* ---------------------------------------------------------------- vista mensile */
+async function loadMonth() {
+  const m = state.month; const from = `${m}-01`; const to = lastOfMonth(m);
+  try { state.monthBookings = await api(`/api/bookings?from=${from}&to=${to}`); }
+  catch (e) { if (e.status === 401) location.reload(); toast(e.message, 'err'); return; }
+  renderMonth();
+}
+function renderMonth() {
+  const cfg = state.cfg; const m = state.month; const n = nowLocal();
+  const open = toMin(cfg.close_time) - toMin(cfg.open_time);
+  const all = state.monthBookings;
+  $('#cal-title').innerHTML = `${monthName(m)[0].toUpperCase() + monthName(m).slice(1)} ${m.slice(0, 4)}<small>${all.filter((b) => b.own_company).length} prenotazioni della tua azienda questo mese</small>`;
+  $('#quota-box').innerHTML = quotaPill();
+  $('#month-banner').innerHTML = monthLockBanner(m);
+  const first = `${m}-01`; const lead = (weekday(first) + 6) % 7; const last = lastOfMonth(m);
+  const days = []; for (let i = 0; i < lead; i++) days.push(null);
+  for (let d = first; d <= last; d = addDays(d, 1)) days.push(d);
+  while (days.length % 7) days.push(null);
+  const cell = (d) => {
+    if (!d) return '<div class="mc mc-empty"></div>';
+    const closed = isClosed(d); const past = d < n.date; const locked = !inBookableMonth(d);
+    const rooms = isSaturday(d) ? cfg.rooms.filter(isGym) : cfg.rooms;
+    const list = all.filter((b) => b.date === d);
+    const own = list.filter((b) => b.own_company).length;
+    let body = '';
+    if (closed) body = `<div class="mc-closed">${esc(closureReason(d) || (weekday(d) === 0 ? '' : weekday(d) === 6 ? 'Chiuso' : 'Chiuso'))}</div>`;
+    else body = rooms.map((r) => {
+      const mins = list.filter((b) => b.room_id === r.id).reduce((t, b) => t + toMin(b.end) - toMin(b.start), 0);
+      const cap = isGym(r) ? open * 2 : open;
+      const pct = Math.min(100, Math.round((100 * mins) / cap));
+      return `<div class="mc-room" title="${esc(r.name)}: ${pct}% occupata"><i style="background:${r.color}"></i><span>${esc(r.name)}</span><em><b style="width:${pct}%;background:${r.color}"></b></em></div>`;
+    }).join('');
+    return `<button class="mc ${d === n.date ? 'today' : ''} ${past ? 'past' : ''} ${closed ? 'closed' : ''} ${locked ? 'locked' : ''}" data-d="${d}">
+      <div class="mc-head"><b>${Number(d.slice(8))}</b>${d === n.date ? '<span class="mc-today">Oggi</span>' : ''}${own ? `<span class="mc-own" title="Prenotazioni della tua azienda">${own}</span>` : ''}${locked && !past ? '<span class="mc-lock" title="Non ancora prenotabile">🔒</span>' : ''}</div>${body}</button>`;
+  };
+  $('#month-wrap').innerHTML = `<div class="card month-card"><div class="month-grid">${['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'].map((g) => `<div class="mc-dow">${g}</div>`).join('')}${days.map(cell).join('')}</div></div>
+    <div class="legend"><span>Le barre mostrano quanto è occupata ogni sala nella giornata. Clicca su un giorno per vedere gli orari e prenotare.</span></div>`;
+  $$('#month-wrap .mc[data-d]').forEach((b) => (b.onclick = () => { if (b.classList.contains('closed')) return; state.view = 'giorno'; go(b.dataset.d); }));
+}
 
 async function loadDay() {
   if (!$('#grid-wrap')) return;
@@ -157,11 +230,12 @@ function renderGrid() {
   $('#cal-title').innerHTML = `${fmtDateLong(d).replace(/ \d{4}$/, '')}<small>${d === n.date ? 'Oggi · ' : ''}${cfg.open_time} – ${cfg.close_time} · ${state.bookings.filter((b) => b.date === d).length} prenotazioni</small>`;
   $('#pick-date').value = d;
   $('#quota-box').innerHTML = quotaPill();
+  $('#month-banner').innerHTML = monthLockBanner(d.slice(0, 7));
   const q = cfg.quota;
   $('#quota-banner').innerHTML = q && q.limit != null && q.remaining <= 0 ? `<div class="quota-banner">⏱ La tua azienda ha esaurito le ${fmtHours(q.limit)} di sala riunioni di ${MESI[+q.month.slice(5) - 1]}. Potrai prenotare di nuovo dal primo giorno del mese prossimo (la palestra resta prenotabile).</div>` : '';
   $('#week').innerHTML = state.week.map((wd) => {
     const cnt = state.bookings.filter((b) => b.date === wd && b.own_company).length;
-    return `<button class="week-day ${wd === d ? 'active' : ''} ${wd === n.date ? 'today' : ''} ${isClosed(wd) ? 'closed' : ''}" data-d="${wd}" title="${isClosed(wd) ? esc(closureReason(wd) || 'Chiuso') : (cnt ? cnt + ' prenotazioni della tua azienda' : '')}">
+    return `<button class="week-day ${wd === d ? 'active' : ''} ${wd === n.date ? 'today' : ''} ${isClosed(wd) || !inBookableMonth(wd) ? 'closed' : ''}" data-d="${wd}" title="${isClosed(wd) ? esc(closureReason(wd) || 'Chiuso') : (cnt ? cnt + ' prenotazioni della tua azienda' : '')}">
       ${cnt ? '<span class="dot"></span>' : ''}<small>${GIORNI_BREVI[weekday(wd)]}</small><b>${Number(wd.slice(8))}</b></button>`;
   }).join('');
   $$('#week .week-day').forEach((b) => (b.onclick = () => go(b.dataset.d)));
@@ -175,7 +249,7 @@ function renderGrid() {
   const rooms = isSaturday(d) ? cfg.rooms.filter(isGym) : cfg.rooms; const N = slotsCount(); const cols = `64px repeat(${rooms.length}, minmax(150px, 1fr))`;
   const dayBookings = state.bookings.filter((b) => b.date === d);
   const isToday = d === n.date;
-  const isPastSlot = (i) => d < n.date || (isToday && toMin(slotTime(i)) + cfg.slot_minutes <= n.min);
+  const isPastSlot = (i) => !inBookableMonth(d) || d < n.date || (isToday && toMin(slotTime(i)) + cfg.slot_minutes <= n.min);
 
   let head = `<div class="cal-head" style="grid-template-columns:${cols}"><div></div>`;
   for (const r of rooms) {
@@ -318,7 +392,7 @@ async function bookingModal(b, onClose) {
     <form class="modal-body" id="bk-form" autocomplete="off">
       <label class="field"><span>Titolo della riunione</span><input name="title" required maxlength="120" placeholder="Es. Riunione commerciale, colloquio, call con cliente…" value="${esc(f.title)}"></label>
       <div class="row-3">
-        <label class="field"><span>Giorno</span><input type="date" name="date" required value="${f.date}"></label>
+        <label class="field"><span>Giorno</span><input type="date" name="date" required value="${f.date}" ${lockedMonth() && !editing ? `min="${nowLocal().date}" max="${lastOfMonth(curMonth())}"` : ''}></label>
         <label class="field"><span>Dalle</span><select name="start"></select></label>
         <label class="field"><span>Alle</span><select name="end"></select></label>
       </div>
@@ -354,7 +428,8 @@ async function bookingModal(b, onClose) {
     const q = cfg.quota;
     $('#bk-summary', m.el).innerHTML = d ? `${ICON.cal} ${fmtDateLong(d)} · ${a}–${z} · ${dur(a, z)}${q && q.limit != null && !isAdmin ? ` · restano ${fmtHours(q.remaining + (editing ? (toMin(b.end) - toMin(b.start)) / 60 : 0))} questo mese` : ''}` : '';
     let warn = '';
-    if (d && isClosed(d)) warn = offDay(d) ? 'Le sale sono prenotabili solo dal lunedì al venerdì.' : `Lo stabile è chiuso: ${closureReason(d) || 'chiusura'}.`;
+    if (d && !inBookableMonth(d)) warn = d > nowLocal().date ? `Puoi prenotare solo nel mese in corso (${monthName(curMonth())}). Le prenotazioni di ${monthName(d.slice(0, 7))} si aprono il 1° ${monthName(d.slice(0, 7))}.` : 'Non è possibile prenotare nel passato.';
+    else if (d && isClosed(d)) warn = offDay(d) ? 'Le sale sono prenotabili solo dal lunedì al venerdì.' : `Lo stabile è chiuso: ${closureReason(d) || 'chiusura'}.`;
     else if (d && isSaturday(d)) warn = 'Il sabato è prenotabile solo la palestra: le sale riunioni sono disponibili dal lunedì al venerdì.';
     const list = d && !warn ? await dayList(d) : [];
     $('#room-pick', m.el).innerHTML = meetingRooms().map((r) => {
@@ -394,7 +469,7 @@ async function bookingModal(b, onClose) {
       m.close();
       await refreshCfg();
       if (data.date !== state.date && location.hash !== '#mie') state.date = data.date;
-      location.hash === '#mie' ? renderMine() : loadDay();
+      location.hash === '#mie' ? renderMine() : refreshCal();
     } catch (err) { $('#bk-err', m.el).textContent = err.message; btn.disabled = false; }
   };
   if (editing) $('#bk-del', m.el).onclick = async () => { if (await cancelBooking(b)) m.close(); };
@@ -412,7 +487,7 @@ async function cancelBooking(b) {
     toast(r.cancelled > 1 ? `${r.cancelled} prenotazioni annullate` : 'Prenotazione annullata');
     if (r.late_penalties) toast(`Annullamento tardivo: registrata una penale di ${euro(r.penalty_amount)}`, 'warn');
     await refreshCfg();
-    location.hash === '#mie' ? renderMine() : loadDay();
+    location.hash === '#mie' ? renderMine() : refreshCal();
     return true;
   } catch (e) { toast(e.message, 'err'); return false; }
 }
@@ -467,7 +542,7 @@ async function renderMine() {
           ${state.cfg.rooms.filter(isReception).map((r) => `<li><b>${esc(r.name)}</b> (${r.capacity}+ posti) si prenota direttamente <b>alla reception</b>.</li>`).join('')}
           ${state.cfg.rooms.some(isGym) ? `<li>Palestra: un'ora alla volta${satOpen() ? ', <b>dal lunedì al sabato</b>' : ''}${state.cfg.gym_weekly_hours ? `, massimo <b>${state.cfg.gym_weekly_hours} ore a settimana</b> per persona` : ''}. Non scala dal monte ore.</li>` : ''}
           <li>Blocchi da ${state.cfg.slot_minutes} minuti, massimo ${String(state.cfg.max_hours_per_booking).replace('.', ',')} ore per prenotazione.</li>
-          <li>Prenotazione fino a ${state.cfg.max_advance_days} giorni in anticipo.</li>
+          ${state.cfg.current_month_only ? `<li>Si prenota <b>solo nel mese in corso</b>: le prenotazioni del mese successivo si aprono il primo giorno del mese.</li>` : `<li>Prenotazione fino a ${state.cfg.max_advance_days} giorni in anticipo.</li>`}
           ${q && q.limit != null ? `<li>Ogni azienda ha <b>${fmtHours(q.limit)} di sala al mese</b>; superata la soglia non si può più prenotare fino al mese successivo.</li>` : ''}
           ${state.cfg.checkin_required ? `<li>Conferma la presenza sul tablet della sala entro <b>${state.cfg.checkin_grace_minutes} minuti</b> dall'inizio, altrimenti la sala viene liberata.</li>` : ''}
           <li>Riceverai un'<b>email di promemoria</b> 24 ore prima.</li>
@@ -546,10 +621,10 @@ async function gymModal({ date, start }) {
   const hours = []; for (let t = Math.ceil(toMin(cfg.open_time) / 60) * 60; t + 60 <= toMin(cfg.close_time); t += 60) hours.push(toHHMM(t));
   const n = nowLocal();
   let gender = state.me.gender || 'M';
-  const f = { date: date && !isClosed(date) ? date : firstBookableDay(), start: hours.includes(start) ? start : null };
+  const f = { date: date && !isClosed(date) && inBookableMonth(date) ? date : firstBookableDay(), start: hours.includes(start) ? start : null };
   const m = openModal(`<div class="modal-head"><h3>🏋️ Prenota ${esc(gym.name)}</h3><button class="icon-btn" data-close>✕</button></div>
     <form class="modal-body" id="gf">
-      <div class="row"><label class="field"><span>Giorno</span><input type="date" name="date" value="${f.date}" required></label>
+      <div class="row"><label class="field"><span>Giorno</span><input type="date" name="date" value="${f.date}" required ${lockedMonth() ? `min="${nowLocal().date}" max="${lastOfMonth(curMonth())}"` : ''}></label>
       <label class="field"><span>Ora</span><select name="start"></select></label></div>
       <div class="field" style="margin-bottom:6px"><span>Accesso</span></div>
       <div class="gender-pick" id="gp"></div>
@@ -572,7 +647,7 @@ async function gymModal({ date, start }) {
     const busyG = (g) => cfg.gym_rule === 'uno_per_sesso' ? taken(t, g).length > 0 : cfg.gym_rule === 'stesso_sesso' ? taken(t).some((x) => x.gender !== g) || taken(t).length >= 2 : taken(t).length >= gym.capacity;
     $('#gp', m.el).innerHTML = ['M', 'F'].map((g) => `<label class="gender-opt ${gender === g ? 'checked' : ''} ${busyG(g) ? 'busy' : ''}"><input type="radio" name="gender" value="${g}" ${gender === g ? 'checked' : ''} ${busyG(g) ? 'disabled' : ''}><span class="g-ico">${g === 'M' ? '🙋‍♂️' : '🙋‍♀️'}</span><b>${GENDER[g]}</b><small class="${busyG(g) ? 'ko' : 'ok'}">${busyG(g) ? 'Posto occupato' : '● Posto libero'}</small></label>`).join('');
     $$('#gp input', m.el).forEach((i) => i.onchange = () => { gender = i.value; refresh(); });
-    $('#g-err', m.el).textContent = isClosed(d) ? `La palestra è prenotabile dal lunedì al ${satOpen() ? 'sabato' : 'venerdì'}, esclusi i giorni di chiusura.` : '';
+    $('#g-err', m.el).textContent = !inBookableMonth(d) ? `Puoi prenotare solo nel mese in corso (${monthName(curMonth())}).` : isClosed(d) ? `La palestra è prenotabile dal lunedì al ${satOpen() ? 'sabato' : 'venerdì'}, esclusi i giorni di chiusura.` : '';
     const lim = cfg.gym_weekly_hours;
     if (lim && state.me.role !== 'admin') {
       const mon = mondayOf(d);
@@ -591,7 +666,7 @@ async function gymModal({ date, start }) {
       await api('/api/bookings', { method: 'POST', body: { room_id: gym.id, date: form.date.value, start: st, end: toHHMM(toMin(st) + 60), gender } });
       state.me.gender = gender;
       m.close(); toast("Palestra prenotata! Ti abbiamo inviato un'email");
-      if (location.hash === '#mie') renderMine(); else { state.date = form.date.value; loadDay(); }
+      if (location.hash === '#mie') renderMine(); else { state.date = form.date.value; refreshCal(); }
     } catch (x) { $('#g-err', m.el).textContent = x.message; btn.disabled = false; }
   };
 }

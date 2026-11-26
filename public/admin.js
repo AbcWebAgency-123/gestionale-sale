@@ -405,6 +405,7 @@ async function impostazioni() {
         <p class="muted small">Le sale riunioni sono prenotabili dal lunedì al venerdì (la palestra anche il sabato, se attivato). Per i giorni di chiusura usa la sezione Chiusure.</p>
       </div></div>
       <div class="card"><div class="card-head"><h3>Limiti per un uso equo tra le aziende</h3></div><div class="card-pad">
+        ${chk('current_month_only', 'Prenotazioni solo nel mese in corso', 'A dicembre non si può prenotare per gennaio: il mese successivo si apre il primo giorno del mese.')}
         <div class="row"><label class="field"><span>Durata massima (ore)</span><input type="number" step="0.5" min="0.5" name="max_hours_per_booking" value="${s.max_hours_per_booking}"></label>
         <label class="field"><span>Anticipo massimo (giorni)</span><input type="number" min="1" name="max_advance_days" value="${s.max_advance_days}"></label></div>
         <div class="row"><label class="field"><span>Prenotazioni attive per azienda</span><input type="number" min="0" name="max_active_per_company" value="${s.max_active_per_company}"><small>0 = nessun limite</small></label>
@@ -441,7 +442,7 @@ async function impostazioni() {
   $('#f').onsubmit = async (e) => {
     e.preventDefault();
     const d = Object.fromEntries(new FormData(e.target));
-    for (const k of ['checkin_required', 'show_titles_to_others', 'display_show_title', 'display_show_company', 'penalties_enabled', 'reminders_enabled', 'registration_enabled', 'registration_approval', 'gym_saturday']) d[k] = d[k] ? '1' : '0';
+    for (const k of ['checkin_required', 'show_titles_to_others', 'display_show_title', 'display_show_company', 'penalties_enabled', 'reminders_enabled', 'registration_enabled', 'registration_approval', 'gym_saturday', 'current_month_only']) d[k] = d[k] ? '1' : '0';
     try { await api('/api/admin/settings', { method: 'PUT', body: d }); CFG = await api('/api/config'); toast('Impostazioni salvate'); }
     catch (err) { toast(err.message, 'err'); }
   };
