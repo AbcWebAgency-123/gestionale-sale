@@ -405,7 +405,8 @@ async function impostazioni() {
         <p class="muted small">Le sale riunioni sono prenotabili dal lunedì al venerdì (la palestra anche il sabato, se attivato). Per i giorni di chiusura usa la sezione Chiusure.</p>
       </div></div>
       <div class="card"><div class="card-head"><h3>Limiti per un uso equo tra le aziende</h3></div><div class="card-pad">
-        ${chk('current_month_only', 'Prenotazioni solo nel mese in corso', 'A dicembre non si può prenotare per gennaio: il mese successivo si apre il primo giorno del mese.')}
+        ${chk('current_month_only', 'Prenotazioni limitate al mese in corso', 'Le aziende prenotano nel mese corrente; il mese successivo si apre dal giorno indicato qui sotto.')}
+        <label class="field"><span>Dal giorno del mese si apre anche il mese successivo</span><input type="number" min="0" max="31" name="next_month_open_day" value="${esc(s.next_month_open_day)}"><small>Es. 20: dal 20 novembre si può prenotare anche per dicembre. 0 = solo dal primo giorno del mese.</small></label>
         <div class="row"><label class="field"><span>Durata massima (ore)</span><input type="number" step="0.5" min="0.5" name="max_hours_per_booking" value="${s.max_hours_per_booking}"></label>
         <label class="field"><span>Anticipo massimo (giorni)</span><input type="number" min="1" name="max_advance_days" value="${s.max_advance_days}"></label></div>
         <div class="row"><label class="field"><span>Prenotazioni attive per azienda</span><input type="number" min="0" name="max_active_per_company" value="${s.max_active_per_company}"><small>0 = nessun limite</small></label>
@@ -425,6 +426,7 @@ async function impostazioni() {
         <label class="field"><span>Email che riceve gli avvisi delle iscrizioni da approvare</span><input type="email" name="admin_notify_email" value="${esc(s.admin_notify_email)}" placeholder="es. info@ufficicardo.com"></label>
         <label class="field"><span>Email che riceve i moduli della palestra</span><input type="email" name="gym_waiver_email" value="${esc(s.gym_waiver_email)}" required></label>
         ${chk('gym_saturday', 'Palestra prenotabile anche il sabato', 'Stessi orari dei giorni feriali. Le sale riunioni restano dal lunedì al venerdì.')}
+        ${chk('gym_rotation', 'Rotazione degli orari in palestra', 'Una persona non può prenotare lo stesso giorno alla stessa ora in due settimane consecutive, così tutti possono usare ogni fascia.')}
         <label class="field"><span>Ore di palestra a settimana per persona</span><input type="number" min="0" step="1" name="gym_weekly_hours" value="${esc(s.gym_weekly_hours)}"><small>0 = nessun limite. La settimana va dal lunedì alla domenica.</small></label>
         <label class="field"><span>Regola di accesso alla palestra</span><select name="gym_rule">${[['uno_per_sesso', 'Massimo 1 uomo + 1 donna per ora'], ['stesso_sesso', 'Massimo 2 persone dello stesso sesso per ora'], ['misto', 'Fino alla capienza, senza distinzione']].map(([v, l]) => `<option value="${v}" ${s.gym_rule === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div></div>
@@ -442,7 +444,7 @@ async function impostazioni() {
   $('#f').onsubmit = async (e) => {
     e.preventDefault();
     const d = Object.fromEntries(new FormData(e.target));
-    for (const k of ['checkin_required', 'show_titles_to_others', 'display_show_title', 'display_show_company', 'penalties_enabled', 'reminders_enabled', 'registration_enabled', 'registration_approval', 'gym_saturday', 'current_month_only']) d[k] = d[k] ? '1' : '0';
+    for (const k of ['checkin_required', 'show_titles_to_others', 'display_show_title', 'display_show_company', 'penalties_enabled', 'reminders_enabled', 'registration_enabled', 'registration_approval', 'gym_saturday', 'current_month_only', 'gym_rotation']) d[k] = d[k] ? '1' : '0';
     try { await api('/api/admin/settings', { method: 'PUT', body: d }); CFG = await api('/api/config'); toast('Impostazioni salvate'); }
     catch (err) { toast(err.message, 'err'); }
   };

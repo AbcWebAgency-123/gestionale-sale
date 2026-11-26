@@ -161,7 +161,9 @@ const DEFAULT_SETTINGS = {
   registration_approval: '1',        // ogni iscrizione va approvata dall'amministrazione
   gym_saturday: '1',                 // la palestra è prenotabile anche il sabato
   gym_weekly_hours: '3',
-  current_month_only: '1',           // le aziende prenotano solo nel mese in corso             // ore di palestra a settimana per persona (vuoto/0 = illimitate)
+  current_month_only: '1',           // le aziende prenotano solo nel mese in corso…
+  next_month_open_day: '20',         // …e dal giorno 20 anche nel mese successivo
+  gym_rotation: '1',                 // palestra: niente stesso giorno e ora in due settimane consecutive             // ore di palestra a settimana per persona (vuoto/0 = illimitate)
   checkin_enabled_at: '',
   lobby_token: crypto.randomBytes(16).toString('hex'),
 };
@@ -450,6 +452,15 @@ function dayOpenFor(room, date, s = S()) {
   if (wd === 6) return !!(room && room.kind === 'palestra' && s.gymSaturday);
   return true;
 }
+// Mesi prenotabili: il mese in corso e, dal giorno "next_month_open_day", anche il successivo
+const nextMonthOf = (m) => { const [y, mm] = m.split('-').map(Number); return mm === 12 ? `${y + 1}-01` : `${y}-${String(mm + 1).padStart(2, '0')}`; };
+function bookableMonths(today, s) {
+  const cur = today.slice(0, 7);
+  const openDay = parseInt(s.next_month_open_day, 10) || 0;
+  const months = [cur];
+  if (openDay && parseInt(today.slice(8, 10), 10) >= openDay) months.push(nextMonthOf(cur));
+  return { months, openDay };
+}
 function bookingWindowIssues({ date, start, end }, s, { isAdmin = false, ignorePast = false, room = null } = {}) {
   if (!isDate(date)) return 'Data non valida';
   if (!isTime(start) || !isTime(end)) return 'Orario non valido';
@@ -470,10 +481,14 @@ function bookingWindowIssues({ date, start, end }, s, { isAdmin = false, ignoreP
     // si può prenotare lo slot in corso, ma non uno già finito
     if (date === n.date && a < n.min - s.slot) return "L'orario di inizio è già passato";
   }
-  if (!isAdmin && s.current_month_only === '1' && date.slice(0, 7) !== n.date.slice(0, 7)) {
-    const mese = MESI_IT[parseInt(n.date.slice(5, 7), 10) - 1];
-    const dopo = MESI_IT[parseInt(date.slice(5, 7), 10) - 1];
-    return date > n.date ? `Puoi prenotare solo nel mese in corso (${mese}). Le prenotazioni di ${dopo} si aprono il 1° ${dopo}.` : 'Non è possibile prenotare nel passato';
+  if (!isAdmin && s.current_month_only === '1' && date > n.date) {
+    const w = bookableMonths(n.date, s);
+    if (!w.months.includes(date.slice(0, 7))) {
+      const dopo = MESI_IT[parseInt(date.slice(5, 7), 10) - 1];
+      const nextM = nextMonthOf(n.date.slice(0, 7));
+      if (date.slice(0, 7) === nextM && w.openDay) return `Le prenotazioni di ${dopo} si aprono il ${w.openDay} ${MESI_IT[parseInt(n.date.slice(5, 7), 10) - 1]}.`;
+      return `Non puoi ancora prenotare per ${dopo}: si prenota nel mese in corso${w.openDay ? ` e, dal giorno ${w.openDay}, anche nel mese successivo` : ''}.`;
+    }
   }
   if (!isAdmin && s.maxAdvance && daysBetween(n.date, date) > s.maxAdvance) return `Si può prenotare al massimo ${s.maxAdvance} giorni in anticipo`;
   return null;
@@ -542,6 +557,15 @@ function gymWeeklyIssue(userId, date, start, end, s) {
   if (used >= s.gymWeekly - 1e-9) return `Hai già prenotato ${lim} ${s.gymWeekly === 1 ? 'ora' : 'ore'} di palestra nella settimana del ${mondayOf(date).slice(8)}/${mondayOf(date).slice(5, 7)}: il massimo è ${lim} ore a settimana per persona`;
   if (used + add > s.gymWeekly + 1e-9) return `Puoi prenotare la palestra al massimo ${lim} ore a settimana`;
   return null;
+}
+// Rotazione palestra: non lo stesso giorno della settimana alla stessa ora nella settimana prima o dopo
+function gymRotationIssue(userId, roomId, date, start, s) {
+  if (s.gym_rotation !== '1') return null;
+  const clash = db.prepare(`SELECT date FROM bookings WHERE user_id=? AND room_id=? AND status IN ('confermata','liberata') AND start=? AND date IN (?,?)`)
+    .get(userId, roomId, start, addDays(date, -7), addDays(date, 7));
+  if (!clash) return null;
+  const g = ['domenica', 'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato'][weekday(date)];
+  return `Rotazione palestra: hai già il ${g} alle ${start} nella settimana ${clash.date < date ? 'precedente' : 'successiva'}. Scegli un altro giorno o un altro orario, così tutti possono usare la palestra in ogni fascia.`;
 }
 function activeIssue(companyId, s, adding = 1) {
   if (!companyId || !s.maxActive) return null;
@@ -704,6 +728,9 @@ route('GET', '/api/config', (req, res, ctx) => {
     gym_rule: s.gym_rule,
     gym_saturday: s.gym_saturday === '1',
     current_month_only: s.current_month_only === '1',
+    bookable_months: bookableMonths(n.date, s).months,
+    next_month_open_day: parseInt(s.next_month_open_day, 10) || 0,
+    gym_rotation: s.gym_rotation === '1',
     gym_weekly_hours: parseFloat(String(s.gym_weekly_hours || '').replace(',', '.')) || 0,
     gym_week: { this: +gymHoursInWeek(ctx.user.id, n.date).toFixed(2), monday: mondayOf(n.date) },
     rooms: roomsList(),
@@ -725,7 +752,10 @@ route('GET', '/api/bookings', (req, res, ctx) => {
 route('GET', '/api/gym/week', (req, res, ctx) => {
   const d = ctx.query.get('date'); need(isDate(d), 400, 'Data non valida');
   const s = S();
-  send(res, 200, { monday: mondayOf(d), used: +gymHoursInWeek(ctx.user.id, d).toFixed(2), limit: s.gymWeekly || null });
+  const gym = db.prepare("SELECT id FROM rooms WHERE kind='palestra' AND active=1 ORDER BY id LIMIT 1").get();
+  const blocked = s.gym_rotation === '1' && gym && ctx.user.role !== 'admin'
+    ? db.prepare(`SELECT DISTINCT start FROM bookings WHERE user_id=? AND room_id=? AND status IN ('confermata','liberata') AND date IN (?,?)`).all(ctx.user.id, gym.id, addDays(d, -7), addDays(d, 7)).map((r) => r.start) : [];
+  send(res, 200, { monday: mondayOf(d), used: +gymHoursInWeek(ctx.user.id, d).toFixed(2), limit: s.gymWeekly || null, rotation_blocked: blocked });
 });
 route('GET', '/api/bookings/mine', (req, res, ctx) => {
   const s = getSettings(); const n = now();
@@ -771,7 +801,10 @@ function createBookings(ctx, body) {
   need(!first, 400, first);
   if (gym) {
     const g = gymIssue(room, body.date, body.start, body.end, gender, ctx.user.id); need(!g, 409, g);
-    if (!isAdmin) { const w = gymWeeklyIssue(ctx.user.id, body.date, body.start, body.end, s); need(!w, 400, w); }
+    if (!isAdmin) {
+      const w = gymWeeklyIssue(ctx.user.id, body.date, body.start, body.end, s); need(!w, 400, w);
+      const ro = gymRotationIssue(ctx.user.id, room.id, body.date, body.start, s); need(!ro, 400, ro);
+    }
   } else {
     const c0 = conflict(roomId, body.date, body.start, body.end);
     need(!c0, 409, `La sala è già occupata dalle ${c0?.start} alle ${c0?.end}${c0?.company ? ' (' + c0.company + ')' : ''}`);
@@ -788,7 +821,7 @@ function createBookings(ctx, body) {
     for (const d of dates) {
       const issue = bookingWindowIssues({ date: d, start: body.start, end: body.end }, s, { isAdmin, room })
         || (gym ? gymIssue(room, d, body.start, body.end, gender, ctx.user.id) : (conflict(roomId, d, body.start, body.end) ? 'sala già occupata' : null))
-        || (gym && !isAdmin ? gymWeeklyIssue(ctx.user.id, d, body.start, body.end, s) : null)
+        || (gym && !isAdmin ? gymWeeklyIssue(ctx.user.id, d, body.start, body.end, s) || gymRotationIssue(ctx.user.id, room.id, d, body.start, s) : null)
         || (!isAdmin && !gym ? quotaIssue(companyId, d, body.start, body.end) : null)
         || (!isAdmin && !gym && created.length ? activeIssue(companyId, s, 1) : null);
       if (issue) { skipped.push({ date: d, reason: issue }); continue; }
@@ -1122,7 +1155,7 @@ route('DELETE', '/api/admin/closures/:date', (req, res, ctx) => {
 }, A);
 
 const EDITABLE_SETTINGS = ['building_name', 'open_time', 'close_time', 'slot_minutes', 'max_hours_per_booking', 'max_advance_days', 'max_active_per_company', 'max_repeat_weeks', 'checkin_required', 'checkin_grace_minutes', 'show_titles_to_others', 'display_show_title', 'display_show_company',
-  'default_monthly_quota_hours', 'registration_enabled', 'registration_approval', 'gym_saturday', 'gym_weekly_hours', 'current_month_only', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
+  'default_monthly_quota_hours', 'registration_enabled', 'registration_approval', 'gym_saturday', 'gym_weekly_hours', 'current_month_only', 'next_month_open_day', 'gym_rotation', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
 route('GET', '/api/admin/settings', (req, res) => send(res, 200, { ...getSettings(), smtp_configured: mailer.isConfigured(), gym_template_custom: fs.existsSync(path.join(DATA_DIR, 'modulo-palestra.pdf')) }), A);
 route('PUT', '/api/admin/settings', (req, res, ctx) => {
   const b = ctx.body;

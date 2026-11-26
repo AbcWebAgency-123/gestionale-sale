@@ -27,14 +27,20 @@ const closureReason = (d) => (state.cfg.closures.find((c) => c.date === d) || {}
 // prenotazioni consentite solo nel mese in corso (gli amministratori non hanno il vincolo)
 const curMonth = () => nowLocal().date.slice(0, 7);
 const lockedMonth = () => !!(state.cfg.current_month_only && state.me.role !== 'admin');
-const inBookableMonth = (d) => !lockedMonth() || d.slice(0, 7) === curMonth();
+const bookableMonths = () => state.cfg.bookable_months || [curMonth()];
+const inBookableMonth = (d) => !lockedMonth() || d.slice(0, 7) <= curMonth() || bookableMonths().includes(d.slice(0, 7));
+const lastBookableDay = () => lastOfMonth(bookableMonths()[bookableMonths().length - 1]);
+const openDayMsg = (m) => state.cfg.next_month_open_day && m === addMonths(curMonth(), 1)
+  ? `Le prenotazioni di ${monthName(m)} si aprono il ${state.cfg.next_month_open_day} ${monthName(curMonth())}.`
+  : `Le prenotazioni di ${monthName(m)} non sono ancora aperte.`;
 const monthName = (m) => MESI[+m.slice(5, 7) - 1];
 const lastOfMonth = (m) => { const [y, mm] = m.split('-').map(Number); return `${m}-${String(new Date(Date.UTC(y, mm, 0)).getUTCDate()).padStart(2, '0')}`; };
 const addMonths = (m, k) => { const [y, mm] = m.split('-').map(Number); const x = new Date(Date.UTC(y, mm - 1 + k, 1)); return x.toISOString().slice(0, 7); };
 function monthLockBanner(m) {
   if (!lockedMonth() || m === curMonth()) return '';
+  if (m > curMonth() && bookableMonths().includes(m)) return '';
   return m > curMonth()
-    ? `<div class="quota-banner">🔒 Le prenotazioni di ${monthName(m)} si aprono il 1° ${monthName(m)}: puoi prenotare solo nel mese in corso (${monthName(curMonth())}).</div>`
+    ? `<div class="quota-banner">🔒 ${openDayMsg(m)}${state.cfg.next_month_open_day ? ` Il mese successivo diventa prenotabile ogni mese dal giorno ${state.cfg.next_month_open_day}.` : ''}</div>`
     : `<div class="quota-banner" style="background:var(--surface-2,#f1efe9);color:var(--text-2,#4a5856);border-color:var(--line)">Stai guardando un mese passato.</div>`;
 }
 function nextWorkday(d, dir = 1) { let x = d; for (let i = 0; i < 30; i++) { if (!offDay(x)) return x; x = addDays(x, dir); } return x; }
@@ -392,7 +398,7 @@ async function bookingModal(b, onClose) {
     <form class="modal-body" id="bk-form" autocomplete="off">
       <label class="field"><span>Titolo della riunione</span><input name="title" required maxlength="120" placeholder="Es. Riunione commerciale, colloquio, call con cliente…" value="${esc(f.title)}"></label>
       <div class="row-3">
-        <label class="field"><span>Giorno</span><input type="date" name="date" required value="${f.date}" ${lockedMonth() && !editing ? `min="${nowLocal().date}" max="${lastOfMonth(curMonth())}"` : ''}></label>
+        <label class="field"><span>Giorno</span><input type="date" name="date" required value="${f.date}" ${lockedMonth() && !editing ? `min="${nowLocal().date}" max="${lastBookableDay()}"` : ''}></label>
         <label class="field"><span>Dalle</span><select name="start"></select></label>
         <label class="field"><span>Alle</span><select name="end"></select></label>
       </div>
@@ -428,7 +434,7 @@ async function bookingModal(b, onClose) {
     const q = cfg.quota;
     $('#bk-summary', m.el).innerHTML = d ? `${ICON.cal} ${fmtDateLong(d)} · ${a}–${z} · ${dur(a, z)}${q && q.limit != null && !isAdmin ? ` · restano ${fmtHours(q.remaining + (editing ? (toMin(b.end) - toMin(b.start)) / 60 : 0))} questo mese` : ''}` : '';
     let warn = '';
-    if (d && !inBookableMonth(d)) warn = d > nowLocal().date ? `Puoi prenotare solo nel mese in corso (${monthName(curMonth())}). Le prenotazioni di ${monthName(d.slice(0, 7))} si aprono il 1° ${monthName(d.slice(0, 7))}.` : 'Non è possibile prenotare nel passato.';
+    if (d && !inBookableMonth(d)) warn = openDayMsg(d.slice(0, 7));
     else if (d && isClosed(d)) warn = offDay(d) ? 'Le sale sono prenotabili solo dal lunedì al venerdì.' : `Lo stabile è chiuso: ${closureReason(d) || 'chiusura'}.`;
     else if (d && isSaturday(d)) warn = 'Il sabato è prenotabile solo la palestra: le sale riunioni sono disponibili dal lunedì al venerdì.';
     const list = d && !warn ? await dayList(d) : [];
@@ -541,8 +547,9 @@ async function renderMine() {
           <li>Sale prenotabili dal <b>lunedì al venerdì</b>, dalle <b>${state.cfg.open_time}</b> alle <b>${state.cfg.close_time}</b>.</li>
           ${state.cfg.rooms.filter(isReception).map((r) => `<li><b>${esc(r.name)}</b> (${r.capacity}+ posti) si prenota direttamente <b>alla reception</b>.</li>`).join('')}
           ${state.cfg.rooms.some(isGym) ? `<li>Palestra: un'ora alla volta${satOpen() ? ', <b>dal lunedì al sabato</b>' : ''}${state.cfg.gym_weekly_hours ? `, massimo <b>${state.cfg.gym_weekly_hours} ore a settimana</b> per persona` : ''}. Non scala dal monte ore.</li>` : ''}
+          ${state.cfg.rooms.some(isGym) && state.cfg.gym_rotation ? '<li>Palestra a <b>rotazione</b>: non puoi prenotare lo stesso giorno alla stessa ora in due settimane consecutive.</li>' : ''}
           <li>Blocchi da ${state.cfg.slot_minutes} minuti, massimo ${String(state.cfg.max_hours_per_booking).replace('.', ',')} ore per prenotazione.</li>
-          ${state.cfg.current_month_only ? `<li>Si prenota <b>solo nel mese in corso</b>: le prenotazioni del mese successivo si aprono il primo giorno del mese.</li>` : `<li>Prenotazione fino a ${state.cfg.max_advance_days} giorni in anticipo.</li>`}
+          ${state.cfg.current_month_only ? `<li>Si prenota nel <b>mese in corso</b>${state.cfg.next_month_open_day ? `; dal giorno <b>${state.cfg.next_month_open_day}</b> si apre anche il mese successivo` : ''}.</li>` : `<li>Prenotazione fino a ${state.cfg.max_advance_days} giorni in anticipo.</li>`}
           ${q && q.limit != null ? `<li>Ogni azienda ha <b>${fmtHours(q.limit)} di sala al mese</b>; superata la soglia non si può più prenotare fino al mese successivo.</li>` : ''}
           ${state.cfg.checkin_required ? `<li>Conferma la presenza sul tablet della sala entro <b>${state.cfg.checkin_grace_minutes} minuti</b> dall'inizio, altrimenti la sala viene liberata.</li>` : ''}
           <li>Riceverai un'<b>email di promemoria</b> 24 ore prima.</li>
@@ -624,7 +631,7 @@ async function gymModal({ date, start }) {
   const f = { date: date && !isClosed(date) && inBookableMonth(date) ? date : firstBookableDay(), start: hours.includes(start) ? start : null };
   const m = openModal(`<div class="modal-head"><h3>🏋️ Prenota ${esc(gym.name)}</h3><button class="icon-btn" data-close>✕</button></div>
     <form class="modal-body" id="gf">
-      <div class="row"><label class="field"><span>Giorno</span><input type="date" name="date" value="${f.date}" required ${lockedMonth() ? `min="${nowLocal().date}" max="${lastOfMonth(curMonth())}"` : ''}></label>
+      <div class="row"><label class="field"><span>Giorno</span><input type="date" name="date" value="${f.date}" required ${lockedMonth() ? `min="${nowLocal().date}" max="${lastBookableDay()}"` : ''}></label>
       <label class="field"><span>Ora</span><select name="start"></select></label></div>
       <div class="field" style="margin-bottom:6px"><span>Accesso</span></div>
       <div class="gender-pick" id="gp"></div>
@@ -641,17 +648,19 @@ async function gymModal({ date, start }) {
     const full = (t) => cfg.gym_rule === 'uno_per_sesso' ? taken(t, 'M').length && taken(t, 'F').length : taken(t).length >= (cfg.gym_rule === 'misto' ? gym.capacity : 2);
     const past = (t) => d < n.date || (d === n.date && toMin(t) + 60 <= n.min);
     const cur = form.start.value || f.start;
-    form.start.innerHTML = hours.map((t) => `<option value="${t}" ${past(t) || full(t) ? 'disabled' : ''} ${t === cur ? 'selected' : ''}>${t} – ${toHHMM(toMin(t) + 60)}${past(t) ? '' : full(t) ? '  (completa)' : taken(t).length ? '  (1 posto libero)' : ''}</option>`).join('');
-    if (form.start.selectedOptions[0]?.disabled) { const first = hours.find((t) => !past(t) && !full(t)); if (first) form.start.value = first; }
+    const wk = state.me.role === 'admin' ? { used: 0, rotation_blocked: [] } : await api(`/api/gym/week?date=${d}`).catch(() => ({ used: 0, rotation_blocked: [] }));
+    const rot = (t) => (wk.rotation_blocked || []).includes(t);
+    form.start.innerHTML = hours.map((t) => `<option value="${t}" ${past(t) || full(t) || rot(t) ? 'disabled' : ''} ${t === cur ? 'selected' : ''}>${t} – ${toHHMM(toMin(t) + 60)}${past(t) ? '' : rot(t) ? '  (rotazione: già tua la settimana vicina)' : full(t) ? '  (completa)' : taken(t).length ? '  (1 posto libero)' : ''}</option>`).join('');
+    if (form.start.selectedOptions[0]?.disabled) { const first = hours.find((t) => !past(t) && !full(t) && !rot(t)); if (first) form.start.value = first; }
     const t = form.start.value;
     const busyG = (g) => cfg.gym_rule === 'uno_per_sesso' ? taken(t, g).length > 0 : cfg.gym_rule === 'stesso_sesso' ? taken(t).some((x) => x.gender !== g) || taken(t).length >= 2 : taken(t).length >= gym.capacity;
     $('#gp', m.el).innerHTML = ['M', 'F'].map((g) => `<label class="gender-opt ${gender === g ? 'checked' : ''} ${busyG(g) ? 'busy' : ''}"><input type="radio" name="gender" value="${g}" ${gender === g ? 'checked' : ''} ${busyG(g) ? 'disabled' : ''}><span class="g-ico">${g === 'M' ? '🙋‍♂️' : '🙋‍♀️'}</span><b>${GENDER[g]}</b><small class="${busyG(g) ? 'ko' : 'ok'}">${busyG(g) ? 'Posto occupato' : '● Posto libero'}</small></label>`).join('');
     $$('#gp input', m.el).forEach((i) => i.onchange = () => { gender = i.value; refresh(); });
-    $('#g-err', m.el).textContent = !inBookableMonth(d) ? `Puoi prenotare solo nel mese in corso (${monthName(curMonth())}).` : isClosed(d) ? `La palestra è prenotabile dal lunedì al ${satOpen() ? 'sabato' : 'venerdì'}, esclusi i giorni di chiusura.` : '';
+    $('#g-err', m.el).textContent = !inBookableMonth(d) ? openDayMsg(d.slice(0, 7)) : isClosed(d) ? `La palestra è prenotabile dal lunedì al ${satOpen() ? 'sabato' : 'venerdì'}, esclusi i giorni di chiusura.` : '';
     const lim = cfg.gym_weekly_hours;
     if (lim && state.me.role !== 'admin') {
       const mon = mondayOf(d);
-      const used = (await api(`/api/gym/week?date=${d}`).catch(() => ({ used: 0 }))).used;
+      const used = wk.used;
       $('#g-week', m.el).innerHTML = `🏋️ Settimana dal ${fmtDateShort(mon)}: <b>&nbsp;${String(used).replace('.', ',')} di ${lim} ore&nbsp;</b> prenotate`;
       $('#g-week', m.el).style.color = used >= lim ? 'var(--accent)' : '';
     } else $('#g-week', m.el).style.display = 'none';
