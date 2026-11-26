@@ -1177,6 +1177,81 @@ route('GET', '/api/admin/bookings', (req, res, ctx) => {
 route('GET', '/api/admin/audit', (req, res) => {
   send(res, 200, db.prepare(`SELECT a.*, u.name user_name FROM audit a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 300`).all());
 }, A);
+// ---------------------------------------------------------------- eliminazioni definitive (pannello amministratore)
+function removeWaiverFile(f) {
+  if (!f) return;
+  try { fs.unlinkSync(path.join(UPLOAD_DIR, 'moduli-palestra', path.basename(f))); } catch { /* già rimosso */ }
+}
+function hardDeleteUser(id) {
+  const u = db.prepare('SELECT id,email,gym_waiver_file FROM users WHERE id=?').get(id);
+  if (!u) return null;
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);
+  db.prepare('UPDATE audit SET user_id=NULL WHERE user_id=?').run(id);
+  db.prepare('DELETE FROM users WHERE id=?').run(id);
+  removeWaiverFile(u.gym_waiver_file);
+  return u;
+}
+const tx = (fn) => { db.exec('BEGIN'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
+route('DELETE', '/api/admin/users/:id/permanent', (req, res, ctx) => {
+  const id = +ctx.params.id; need(id !== ctx.user.id, 400, 'Non puoi eliminare il tuo stesso utente');
+  const u = tx(() => hardDeleteUser(id)); need(u, 404, 'Utente non trovato');
+  audit(ctx.user.id, 'utente_eliminato', u.email); broadcast(); send(res, 200, { ok: true });
+}, A);
+route('DELETE', '/api/admin/companies/:id/permanent', (req, res, ctx) => {
+  const id = +ctx.params.id;
+  const c = db.prepare('SELECT name FROM companies WHERE id=?').get(id); need(c, 404, 'Azienda non trovata');
+  need(!db.prepare("SELECT 1 FROM users WHERE company_id=? AND id=?").get(id, ctx.user.id), 400, 'Non puoi eliminare la tua stessa azienda');
+  const r = tx(() => {
+    const users = db.prepare('SELECT id FROM users WHERE company_id=?').all(id);
+    for (const u of users) hardDeleteUser(u.id);
+    db.prepare('DELETE FROM penalties WHERE company_id=?').run(id);
+    const b = db.prepare('DELETE FROM bookings WHERE company_id=?').run(id).changes;
+    db.prepare('DELETE FROM companies WHERE id=?').run(id);
+    return { users: users.length, bookings: b };
+  });
+  audit(ctx.user.id, 'azienda_eliminata', { name: c.name, ...r }); broadcast(); send(res, 200, { ok: true, ...r });
+}, A);
+route('DELETE', '/api/admin/bookings/:id', (req, res, ctx) => {
+  const b = db.prepare('SELECT id,date,start,room_id FROM bookings WHERE id=?').get(+ctx.params.id); need(b, 404, 'Prenotazione non trovata');
+  tx(() => { db.prepare('DELETE FROM penalties WHERE booking_id=?').run(b.id); db.prepare('DELETE FROM bookings WHERE id=?').run(b.id); });
+  audit(ctx.user.id, 'prenotazione_eliminata', b); broadcast(); send(res, 200, { ok: true });
+}, A);
+route('DELETE', '/api/admin/rooms/:id', (req, res, ctx) => {
+  const r = db.prepare('SELECT id,name FROM rooms WHERE id=?').get(+ctx.params.id); need(r, 404, 'Sala non trovata');
+  const n = tx(() => {
+    db.prepare('DELETE FROM penalties WHERE booking_id IN (SELECT id FROM bookings WHERE room_id=?)').run(r.id);
+    const k = db.prepare('DELETE FROM bookings WHERE room_id=?').run(r.id).changes;
+    db.prepare('DELETE FROM rooms WHERE id=?').run(r.id);
+    return k;
+  });
+  audit(ctx.user.id, 'sala_eliminata', { name: r.name, prenotazioni: n }); broadcast(); send(res, 200, { ok: true, bookings: n });
+}, A);
+route('DELETE', '/api/admin/penalties/:id', (req, res, ctx) => {
+  const ok = db.prepare('DELETE FROM penalties WHERE id=?').run(+ctx.params.id).changes; need(ok, 404, 'Penale non trovata');
+  audit(ctx.user.id, 'penale_eliminata', ctx.params.id); broadcast(); send(res, 200, { ok: true });
+}, A);
+route('DELETE', '/api/admin/outbox/:id', (req, res, ctx) => {
+  const ok = db.prepare('DELETE FROM outbox WHERE id=?').run(+ctx.params.id).changes; need(ok, 404, 'Email non trovata');
+  send(res, 200, { ok: true });
+}, A);
+route('DELETE', '/api/admin/audit/:id', (req, res, ctx) => {
+  const ok = db.prepare('DELETE FROM audit WHERE id=?').run(+ctx.params.id).changes; need(ok, 404, 'Voce non trovata');
+  send(res, 200, { ok: true });
+}, A);
+route('DELETE', '/api/admin/waivers/:id', (req, res, ctx) => {
+  const u = db.prepare('SELECT id,email,gym_waiver_file FROM users WHERE id=?').get(+ctx.params.id); need(u, 404, 'Modulo non trovato');
+  db.prepare("UPDATE users SET gym_waiver_status='nessuno', gym_waiver_file=NULL, gym_waiver_at=NULL, gym_waiver_note='' WHERE id=?").run(u.id);
+  removeWaiverFile(u.gym_waiver_file);
+  audit(ctx.user.id, 'modulo_palestra_eliminato', u.email); broadcast(); send(res, 200, { ok: true });
+}, A);
+route('DELETE', '/api/admin/registrations/:id', (req, res, ctx) => {
+  const u = db.prepare("SELECT id,email,company_id FROM users WHERE id=? AND approval='in_attesa'").get(+ctx.params.id); need(u, 404, 'Richiesta non trovata');
+  tx(() => {
+    hardDeleteUser(u.id);
+    if (u.company_id && !db.prepare('SELECT 1 FROM users WHERE company_id=?').get(u.company_id) && !db.prepare('SELECT 1 FROM bookings WHERE company_id=?').get(u.company_id)) db.prepare('DELETE FROM companies WHERE id=?').run(u.company_id);
+  });
+  audit(ctx.user.id, 'iscrizione_eliminata', u.email); broadcast(); send(res, 200, { ok: true });
+}, A);
 route('GET', '/api/admin/backup', (req, res, ctx) => {
   const file = path.join(DATA_DIR, `backup-${Date.now()}.db`);
   db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);

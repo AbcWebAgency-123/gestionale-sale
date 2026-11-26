@@ -72,6 +72,12 @@ function show() {
   ({ panoramica, prenotazioni, iscrizioni, aziende, utenti, sale, palestra, penali, email, chiusure, impostazioni, registro }[s] || panoramica)();
 }
 const C = () => $('#content');
+const DEL = (id, attr = 'data-rm') => `<button class="btn btn-danger-ghost btn-sm" ${attr}="${id}" title="Elimina definitivamente">🗑 Elimina</button>`;
+// eliminazione definitiva con conferma
+async function hardDelete(url, title, what, after, okMsg = 'Eliminato') {
+  if (!await confirmBox(title, `${what}<br><br><b>L'operazione è definitiva e non si può annullare.</b>`, { okText: 'Elimina', danger: true })) return;
+  try { await api(url, { method: 'DELETE' }); toast(okMsg); updateBadges(); after(); } catch (e) { toast(e.message, 'err'); }
+}
 const head = (title, sub, right = '') => `<div class="page-head"><div><h1>${title}</h1>${sub ? `<p class="muted" style="margin:4px 0 0">${sub}</p>` : ''}</div><div class="spacer"></div>${right}</div>`;
 const thisMonth = () => new Date().toISOString().slice(0, 7);
 
@@ -132,11 +138,13 @@ async function prenotazioni() {
     const tag = { confermata: 'tag-green', cancellata: '', liberata: 'tag-red' };
     $('#bk-body').innerHTML = rows.map((b) => `<tr class="${b.status !== 'confermata' ? 'inactive' : ''}"><td>${fmtDateShort(b.date)}</td><td>${b.start}–${b.end}</td><td>${esc(b.room_name)}</td><td>${esc(b.company_name || '—')}</td><td>${esc(b.title)}${b.series_id ? ' <span class="tag">ricorrente</span>' : ''}</td><td>${esc(b.user_name || '')}</td>
       <td><span class="tag ${tag[b.status]}">${b.status}</span>${b.checked_in ? ' <span class="tag tag-green">check-in</span>' : ''}</td>
-      <td class="actions">${b.status === 'confermata' ? `<button class="btn btn-danger-ghost btn-sm" data-del="${b.id}">Annulla</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Nessuna prenotazione trovata</td></tr>';
+      <td class="actions">${b.status === 'confermata' ? `<button class="btn btn-ghost btn-sm" data-del="${b.id}">Annulla</button> ` : ''}${DEL(b.id)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Nessuna prenotazione trovata</td></tr>';
     $$('[data-del]').forEach((x) => x.onclick = async () => {
       if (!await confirmBox('Annullare la prenotazione?', 'L\'azienda vedrà la prenotazione come annullata e la sala tornerà disponibile.', { okText: 'Annulla prenotazione', danger: true })) return;
       try { await api(`/api/bookings/${x.dataset.del}`, { method: 'DELETE' }); toast('Prenotazione annullata'); load(); } catch (e) { toast(e.message, 'err'); }
     });
+    $$('[data-rm]').forEach((x) => x.onclick = () => { const b = rows.find((r) => r.id === +x.dataset.rm);
+      hardDelete(`/api/admin/bookings/${b.id}`, 'Eliminare la prenotazione?', `<b>${esc(b.title)}</b> · ${esc(b.room_name)}<br>${fmtDateLong(b.date)}, ${b.start}–${b.end}<br><br>Annullare la lascia nello storico; eliminare la cancella del tutto, con eventuali penali collegate.`, load, 'Prenotazione eliminata'); });
   };
   $$('.toolbar input, .toolbar select').forEach((x) => (x.onchange = load));
   load();
@@ -155,8 +163,10 @@ async function aziende() {
       <tr class="${c.active ? '' : 'inactive'}"><td><b>${esc(c.name)}</b>${c.active ? '' : ' <span class="tag">disattivata</span>'}</td><td>${esc(c.location)}</td>
       <td>${esc(c.contact_name)}<br><span class="muted small">${esc(c.contact_email)} ${esc(c.contact_phone)}</span></td>
       <td class="num">${c.users_count}</td><td class="num">${fmtHours(c.hours_this_month)}</td><td class="num">${c.monthly_quota_hours != null ? fmtHours(c.monthly_quota_hours) : c.quota_effective != null ? `<span class="muted" title="Valore predefinito">${fmtHours(c.quota_effective)}</span>` : '<span class="muted">illimitato</span>'}</td>
-      <td class="actions"><button class="btn btn-ghost btn-sm" data-edit="${c.id}">Modifica</button></td></tr>`).join('') || '<tr><td colspan="7" class="empty">Nessuna azienda. Aggiungine una o importale da CSV.</td></tr>';
+      <td class="actions"><button class="btn btn-ghost btn-sm" data-edit="${c.id}">Modifica</button> ${DEL(c.id)}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">Nessuna azienda. Aggiungine una o importale da CSV.</td></tr>';
     $$('[data-edit]').forEach((b) => (b.onclick = () => companyModal(rows.find((c) => c.id === +b.dataset.edit))));
+    $$('[data-rm]').forEach((b) => (b.onclick = () => { const c = rows.find((x) => x.id === +b.dataset.rm);
+      hardDelete(`/api/admin/companies/${c.id}/permanent`, "Eliminare l'azienda?", `<b>${esc(c.name)}</b><br><br>Verranno eliminati anche i suoi <b>${c.users_count} utenti</b>, tutte le sue prenotazioni (passate e future) e le penali. Se vuoi solo bloccarla mantenendo lo storico, usa Modifica → togli “Azienda attiva”.`, aziende, 'Azienda eliminata'); }));
   };
   $('#q').oninput = draw; $('#show-inactive').onchange = draw; draw();
   $('#add').onclick = () => companyModal({ active: 1 });
@@ -235,8 +245,10 @@ async function utenti() {
     $('#body').innerHTML = rows.filter((u) => (inact || u.active) && (!fc || String(u.company_id) === fc) && `${u.name} ${u.email}`.toLowerCase().includes(q)).map((u) => `
       <tr class="${u.active ? '' : 'inactive'}"><td><b>${esc(u.name)}</b>${!u.email_verified ? ' <span class="tag tag-amber" title="Non ha ancora cliccato il link di conferma">da confermare</span>' : u.must_change_password ? ' <span class="tag tag-amber" title="Non ha ancora cambiato la password iniziale">primo accesso</span>' : ''}${u.self_registered ? ' <span class="tag" title="Si è registrato da solo">online</span>' : ''}${u.gym_waiver_status === 'approvato' ? ' <span class="tag tag-green">palestra</span>' : u.gym_waiver_status === 'in_attesa' ? ' <span class="tag tag-amber">modulo palestra</span>' : ''}</td><td>${esc(u.email)}</td><td>${esc(u.company_name || '—')}</td>
       <td><span class="role-pill role-${u.role}">${ROLE[u.role]}</span></td><td class="muted small">${u.last_login ? u.last_login.slice(0, 16).replace('T', ' ') : 'mai'}</td>
-      <td class="actions">${!u.email_verified ? `<button class="btn btn-ghost btn-sm" data-resend="${u.id}">Reinvia conferma</button> ` : ''}<button class="btn btn-ghost btn-sm" data-reset="${u.id}">Reset password</button> <button class="btn btn-ghost btn-sm" data-edit="${u.id}">Modifica</button></td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessun utente</td></tr>';
+      <td class="actions">${!u.email_verified ? `<button class="btn btn-ghost btn-sm" data-resend="${u.id}">Reinvia conferma</button> ` : ''}<button class="btn btn-ghost btn-sm" data-reset="${u.id}">Reset password</button> <button class="btn btn-ghost btn-sm" data-edit="${u.id}">Modifica</button>${u.id !== ME.id ? ' ' + DEL(u.id) : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessun utente</td></tr>';
     $$('[data-edit]').forEach((b) => (b.onclick = () => userModal(rows.find((u) => u.id === +b.dataset.edit), companies)));
+    $$('[data-rm]').forEach((b) => (b.onclick = () => { const u = rows.find((x) => x.id === +b.dataset.rm);
+      hardDelete(`/api/admin/users/${u.id}/permanent`, "Eliminare l'utente?", `<b>${esc(u.name)}</b> (${esc(u.email)})<br><br>L'account verrà cancellato e non potrà più accedere. Le prenotazioni già fatte restano a nome dell'azienda.`, utenti, 'Utente eliminato'); }));
     $$('[data-resend]').forEach((b) => (b.onclick = async () => { try { await api(`/api/admin/users/${b.dataset.resend}/resend-confirmation`, { method: 'POST', body: {} }); toast('Email di conferma inviata di nuovo'); } catch (e) { toast(e.message, 'err'); } }));
     $$('[data-reset]').forEach((b) => (b.onclick = async () => {
       const u = rows.find((x) => x.id === +b.dataset.reset);
@@ -284,7 +296,7 @@ async function iscrizioni() {
     ${rows.map((u) => `<tr><td><b>${esc(u.name)}</b><br><span class="muted small">${esc(u.email)}</span></td>
       <td>${esc(u.company_name || '—')} ${u.new_company ? '<span class="tag tag-amber" title="Nessun altro utente attivo per questa azienda">nuova azienda</span>' : `<span class="tag" title="L'azienda ha già ${u.members} utenti attivi">${u.members} già iscritti</span>`}</td>
       <td class="small">${esc((u.created_at || '').slice(0, 16).replace('T', ' '))}</td>
-      <td class="actions"><button class="btn btn-primary btn-sm" data-ok="${u.id}">Approva</button> <button class="btn btn-danger-ghost btn-sm" data-ko="${u.id}">Rifiuta</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty">Nessuna iscrizione in attesa 🎉</td></tr>'}
+      <td class="actions"><button class="btn btn-primary btn-sm" data-ok="${u.id}">Approva</button> <button class="btn btn-ghost btn-sm" data-ko="${u.id}">Rifiuta</button> ${DEL(u.id)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Nessuna iscrizione in attesa 🎉</td></tr>'}
     </tbody></table></div></div>
     <p class="muted small" style="margin-top:12px">Approvando, la persona riceve via email la password e può prenotare. Il primo iscritto di un'azienda ne diventa il referente.${r.unconfirmed ? ` Ci sono inoltre ${r.unconfirmed} iscrizioni che non hanno ancora confermato l'email: compariranno qui dopo la conferma.` : ''}</p>`;
   $$('[data-ok]').forEach((b) => (b.onclick = async () => {
@@ -292,6 +304,8 @@ async function iscrizioni() {
     if (!await confirmBox("Approvare l'iscrizione?", `<b>${esc(u.name)}</b> (${esc(u.email)})<br>${esc(u.company_name || '')}<br><br>Riceverà via email la password per accedere.`, { okText: 'Approva' })) return;
     try { await api(`/api/admin/registrations/${u.id}/approve`, { method: 'POST', body: {} }); toast('Iscrizione approvata: password inviata via email'); iscrizioni(); updateBadges(); } catch (e) { toast(e.message, 'err'); }
   }));
+  $$('[data-rm]').forEach((b) => (b.onclick = () => { const u = rows.find((x) => x.id === +b.dataset.rm);
+    hardDelete(`/api/admin/registrations/${u.id}`, 'Eliminare la richiesta?', `<b>${esc(u.name)}</b> (${esc(u.email)})<br><br>La richiesta viene cancellata <b>senza inviare alcuna email</b>. Per avvisare la persona usa invece “Rifiuta”.`, iscrizioni, 'Richiesta eliminata'); }));
   $$('[data-ko]').forEach((b) => (b.onclick = async () => {
     const u = rows.find((x) => x.id === +b.dataset.ko);
     const ok = await confirmBox("Rifiutare l'iscrizione?", `<b>${esc(u.name)}</b> (${esc(u.email)}) riceverà un'email e la richiesta verrà eliminata.`, { okText: 'Rifiuta', danger: true, extra: '<label class="field" style="margin-top:12px"><span>Motivo (facoltativo, visibile alla persona)</span><input name="note" placeholder="Es. azienda non presente nello stabile"></label>' });
@@ -307,7 +321,7 @@ async function sale() {
   C().innerHTML = head('Sale e display', 'Configura le sale e i tablet posizionati accanto a ciascuna porta', '<button class="btn btn-primary" id="add">+ Nuova sala</button>') + `
     <div class="room-cards">${rooms.map((r) => `
       <div class="card room-card" style="border-top-color:${r.color}${r.active ? '' : ';opacity:.6'}">
-        <div style="display:flex;gap:10px;align-items:flex-start"><div style="flex:1"><h3>${esc(r.name)} ${r.active ? '' : '<span class="tag">non attiva</span>'}</h3><p class="muted small" style="margin:0">${r.kind === 'palestra' ? '🏋️ Palestra · max ' + r.capacity + ' persone per ora' : r.capacity + ' posti' + (r.kind === 'reception' ? ' · prenotazione alla reception' : '')}${r.location ? ' · ' + esc(r.location) : ''}</p></div><button class="btn btn-ghost btn-sm" data-edit="${r.id}">Modifica</button></div>
+        <div style="display:flex;gap:10px;align-items:flex-start"><div style="flex:1"><h3>${esc(r.name)} ${r.active ? '' : '<span class="tag">non attiva</span>'}</h3><p class="muted small" style="margin:0">${r.kind === 'palestra' ? '🏋️ Palestra · max ' + r.capacity + ' persone per ora' : r.capacity + ' posti' + (r.kind === 'reception' ? ' · prenotazione alla reception' : '')}${r.location ? ' · ' + esc(r.location) : ''}</p></div><button class="btn btn-ghost btn-sm" data-edit="${r.id}">Modifica</button> ${DEL(r.id)}</div>
         <p class="small" style="margin:10px 0 0;color:var(--text-2)">${esc(r.equipment) || '<span class="muted">Nessuna dotazione indicata</span>'}</p>
         <div class="small" style="margin-top:14px;font-weight:600">Link del display</div>
         <div class="link-box"><input readonly value="${link(r.display_token)}"><button class="btn btn-ghost btn-sm" data-copy="${link(r.display_token)}">Copia</button><a class="btn btn-ghost btn-sm" target="_blank" href="${link(r.display_token)}">Apri</a></div>
@@ -327,6 +341,8 @@ async function sale() {
       <li>Se un tablet viene smarrito o rubato, premi <b>Rigenera link</b>: il vecchio indirizzo smetterà di funzionare.</li></ol></div>`;
   $$('[data-copy]').forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copy); toast('Link copiato'); } catch { b.previousElementSibling.select(); document.execCommand('copy'); toast('Link copiato'); } }));
   $$('[data-edit]').forEach((b) => (b.onclick = () => roomModal(rooms.find((r) => r.id === +b.dataset.edit))));
+  $$('[data-rm]').forEach((b) => (b.onclick = () => { const r = rooms.find((x) => x.id === +b.dataset.rm);
+    hardDelete(`/api/admin/rooms/${r.id}`, 'Eliminare la sala?', `<b>${esc(r.name)}</b><br><br>Verranno eliminate anche <b>tutte le sue prenotazioni</b>, passate e future, e il tablet della sala smetterà di funzionare. Per fermarla solo temporaneamente usa Modifica → togli “Sala prenotabile”.`, async () => { CFG = await api('/api/config'); sale(); }, 'Sala eliminata'); }));
   $$('[data-token]').forEach((b) => (b.onclick = async () => { if (!await confirmBox('Rigenerare il link?', 'Il tablet attuale di questa sala smetterà di funzionare finché non imposti il nuovo link.', { okText: 'Rigenera' })) return; await api(`/api/admin/rooms/${b.dataset.token}/token`, { method: 'POST', body: {} }); toast('Nuovo link generato'); sale(); }));
   $('#lobby-regen').onclick = async () => { if (!await confirmBox('Rigenerare il link dell\'atrio?', 'Lo schermo attuale smetterà di funzionare finché non imposti il nuovo link.', { okText: 'Rigenera' })) return; await api('/api/admin/lobby-token', { method: 'POST', body: {} }); toast('Nuovo link generato'); sale(); };
   $('#add').onclick = () => roomModal({ active: 1, capacity: 8, color: '#0891b2', sort_order: rooms.length });
@@ -364,7 +380,7 @@ async function chiusure() {
         <label class="check"><input type="checkbox" name="cancel_bookings"><span><b>Annulla le prenotazioni già presenti</b><small>Altrimenti restano valide e vanno gestite manualmente.</small></span></label>
         <button class="btn btn-primary">Aggiungi</button></form></div>
       <div class="card"><div class="card-head"><h3>Prossime chiusure</h3></div><div class="tbl-wrap" style="max-height:480px"><table class="tbl"><tbody>
-        ${future.map((r) => `<tr><td style="white-space:nowrap"><b>${fmtDateLong(r.date)}</b></td><td>${esc(r.reason)}</td><td class="actions"><button class="btn btn-ghost btn-sm" data-del="${r.date}">Rimuovi</button></td></tr>`).join('') || '<tr><td class="empty">Nessuna chiusura programmata</td></tr>'}
+        ${future.map((r) => `<tr><td style="white-space:nowrap"><b>${fmtDateLong(r.date)}</b></td><td>${esc(r.reason)}</td><td class="actions"><button class="btn btn-danger-ghost btn-sm" data-del="${r.date}">🗑 Elimina</button></td></tr>`).join('') || '<tr><td class="empty">Nessuna chiusura programmata</td></tr>'}
       </tbody></table></div></div>
     </div>
     ${past.length ? `<p class="muted small" style="margin-top:16px">Ultime chiusure passate: ${past.map((r) => fmtDateShort(r.date)).join(', ')}</p>` : ''}`;
@@ -450,7 +466,7 @@ async function palestra() {
     ${rows.map((r) => `<tr><td><b>${esc(r.name)}</b><br><span class="muted small">${esc(r.email)}</span></td><td>${esc(r.company_name || '—')}</td><td>${r.gender === 'F' ? 'Donna' : r.gender === 'M' ? 'Uomo' : '—'}</td>
       <td class="small">${esc((r.uploaded_at || '').slice(0, 16))}</td><td><span class="tag ${ST[r.status]?.[0] || ''}">${ST[r.status]?.[1] || r.status}</span>${r.note ? `<br><span class="muted small">${esc(r.note)}</span>` : ''}</td>
       <td class="actions"><a class="btn btn-ghost btn-sm" href="/api/admin/waivers/${r.id}/file" target="_blank">Apri modulo</a>
-      ${r.status !== 'approvato' ? `<button class="btn btn-primary btn-sm" data-ok="${r.id}">Approva</button>` : ''} ${r.status !== 'rifiutato' ? `<button class="btn btn-danger-ghost btn-sm" data-ko="${r.id}">Rifiuta</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessun modulo caricato</td></tr>'}
+      ${r.status !== 'approvato' ? `<button class="btn btn-primary btn-sm" data-ok="${r.id}">Approva</button>` : ''} ${r.status !== 'rifiutato' ? `<button class="btn btn-ghost btn-sm" data-ko="${r.id}">Rifiuta</button>` : ''} ${DEL(r.id)}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessun modulo caricato</td></tr>'}
     </tbody></table></div></div>`;
   const decide = async (id, decision) => {
     let note = '';
@@ -463,6 +479,8 @@ async function palestra() {
   };
   $$('[data-ok]').forEach((b) => (b.onclick = () => decide(b.dataset.ok, 'approvato')));
   $$('[data-ko]').forEach((b) => (b.onclick = () => decide(b.dataset.ko, 'rifiutato')));
+  $$('[data-rm]').forEach((b) => (b.onclick = () => { const r = rows.find((x) => x.id === +b.dataset.rm);
+    hardDelete(`/api/admin/waivers/${r.id}`, 'Eliminare il modulo?', `Modulo di <b>${esc(r.name)}</b><br><br>Il file viene cancellato e la persona dovrà caricarne uno nuovo prima di prenotare la palestra.`, palestra, 'Modulo eliminato'); }));
   $('#tpl').onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
     const data = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.readAsDataURL(f); });
@@ -483,9 +501,11 @@ async function penali(filter = 'da_addebitare') {
     <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Data</th><th>Sala</th><th>Azienda</th><th>Utente</th><th>Motivo</th><th class="num">Importo</th><th>Stato</th><th></th></tr></thead><tbody>
     ${rows.map((p) => `<tr><td>${p.date ? fmtDateShort(p.date) + ' ' + p.start : '—'}</td><td>${esc(p.room_name || '')}</td><td>${esc(p.company_name || '')}</td><td>${esc(p.user_name || '')}</td>
       <td>${p.reason === 'cancellazione_tardiva' ? 'Annullamento tardivo' : 'Mancato utilizzo'}${p.note ? `<br><span class="muted small">${esc(p.note)}</span>` : ''}</td><td class="num">${eur(p.amount)}</td><td><span class="tag ${ST[p.status][0]}">${ST[p.status][1]}</span></td>
-      <td class="actions">${p.status !== 'addebitata' ? `<button class="btn btn-ghost btn-sm" data-st="addebitata" data-id="${p.id}">Segna addebitata</button>` : ''} ${p.status !== 'annullata' ? `<button class="btn btn-ghost btn-sm" data-st="annullata" data-id="${p.id}">Annulla</button>` : `<button class="btn btn-ghost btn-sm" data-st="da_addebitare" data-id="${p.id}">Ripristina</button>`}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Nessuna penale</td></tr>'}
+      <td class="actions">${p.status !== 'addebitata' ? `<button class="btn btn-ghost btn-sm" data-st="addebitata" data-id="${p.id}">Segna addebitata</button>` : ''} ${p.status !== 'annullata' ? `<button class="btn btn-ghost btn-sm" data-st="annullata" data-id="${p.id}">Annulla</button>` : `<button class="btn btn-ghost btn-sm" data-st="da_addebitare" data-id="${p.id}">Ripristina</button>`} ${DEL(p.id)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Nessuna penale</td></tr>'}
     </tbody></table></div></div>`;
   $$('#pf button').forEach((b) => (b.onclick = () => penali(b.dataset.v)));
+  $$('[data-rm]').forEach((b) => (b.onclick = () => { const p = rows.find((x) => x.id === +b.dataset.rm);
+    hardDelete(`/api/admin/penalties/${p.id}`, 'Eliminare la penale?', `${esc(p.company_name || '')} · ${eur(p.amount)}<br><br>Sparisce anche dallo storico e dall'esportazione CSV. Per non addebitarla mantenendo traccia usa “Annulla”.`, () => penali(filter), 'Penale eliminata'); }));
   $$('[data-st]').forEach((b) => (b.onclick = async () => {
     let note = '';
     if (b.dataset.st === 'annullata') { const r = await confirmBox('Annullare la penale?', 'La penale non verrà addebitata.', { okText: 'Annulla penale', extra: '<label class="field" style="margin-top:12px"><span>Motivo (facoltativo)</span><input name="note" placeholder="Es. tablet guasto, riunione spostata dall\'amministrazione"></label>' }); if (!r) return; note = r.note || ''; }
@@ -504,13 +524,15 @@ async function email() {
     <div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Creata</th><th>Destinatario</th><th>Tipo</th><th>Oggetto</th><th>Stato</th><th></th></tr></thead><tbody>
     ${o.rows.map((m) => `<tr><td class="small" style="white-space:nowrap">${esc(m.created_at.slice(0, 16))}</td><td>${esc(m.to_addr)}</td><td class="small">${KIND[m.kind] || esc(m.kind)}</td><td>${esc(m.subject)}</td>
       <td><span class="tag ${ST[m.status]?.[0] || ''}" title="${esc(m.last_error || '')}">${ST[m.status]?.[1] || m.status}</span>${m.last_error ? `<br><span class="muted small">${esc(m.last_error.slice(0, 80))}</span>` : ''}</td>
-      <td class="actions"><button class="btn btn-ghost btn-sm" data-view="${m.id}">Apri</button>${m.status !== 'inviata' ? ` <button class="btn btn-ghost btn-sm" data-retry="${m.id}">Riprova</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessuna email</td></tr>'}
+      <td class="actions"><button class="btn btn-ghost btn-sm" data-view="${m.id}">Apri</button>${m.status !== 'inviata' ? ` <button class="btn btn-ghost btn-sm" data-retry="${m.id}">Riprova</button>` : ''} ${DEL(m.id)}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">Nessuna email</td></tr>'}
     </tbody></table></div></div>`;
   $('#test').onclick = async () => {
     const r = await confirmBox('Email di prova', 'Invia un messaggio di prova per verificare la configurazione.', { okText: 'Invia', extra: `<label class="field" style="margin-top:12px"><span>Destinatario</span><input name="to" value="${esc(ME.email.includes('@sale.local') ? '' : ME.email)}" placeholder="nome@dominio.it"></label>` });
     if (!r) return;
     try { const x = await api('/api/admin/test-email', { method: 'POST', body: { to: r.to } }); toast(x.configured ? 'Email di prova messa in invio' : 'Email in coda: configura SMTP per inviarla', x.configured ? 'ok' : 'warn'); setTimeout(email, 1500); } catch (e) { toast(e.message, 'err'); }
   };
+  $$('[data-rm]').forEach((b) => (b.onclick = () => { const m = o.rows.find((x) => x.id === +b.dataset.rm);
+    hardDelete(`/api/admin/outbox/${m.id}`, "Eliminare l'email?", `<b>${esc(m.subject)}</b><br>A: ${esc(m.to_addr)}<br><br>${m.status === 'inviata' ? "L'email è già stata consegnata: viene tolta solo da questo elenco." : "L'email non verrà più inviata."}`, email, 'Email eliminata'); }));
   $$('[data-retry]').forEach((b) => (b.onclick = async () => { await api(`/api/admin/outbox/${b.dataset.retry}/retry`, { method: 'POST', body: {} }); toast('Nuovo tentativo avviato'); setTimeout(email, 1500); }));
   $$('[data-view]').forEach((b) => (b.onclick = async () => {
     const m = await api(`/api/admin/outbox/${b.dataset.view}`);
@@ -524,9 +546,10 @@ async function registro() {
   const rows = await api('/api/admin/audit');
   const L = { registrazione: 'Nuova registrazione', iscrizione_confermata: 'Iscrizione confermata', penale: 'Penale registrata', modulo_palestra_caricato: 'Modulo palestra caricato', modulo_palestra_approvato: 'Modulo palestra approvato', modulo_palestra_rifiutato: 'Modulo palestra rifiutato', prenotazione_creata: 'Prenotazione creata', prenotazione_modificata: 'Prenotazione modificata', prenotazione_cancellata: 'Prenotazione annullata', auto_rilascio: 'Sala liberata (no check-in)', checkin_display: 'Check-in dal display', termina_display: 'Riunione terminata dal display', cambio_password: 'Cambio password', import_csv: 'Importazione CSV' };
   C().innerHTML = head('Registro attività', 'Ultime 300 operazioni, utile per chiarire contestazioni tra aziende') + `
-    <div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Quando (UTC)</th><th>Chi</th><th>Operazione</th><th>Dettagli</th></tr></thead><tbody>
-    ${rows.map((r) => `<tr><td class="small" style="white-space:nowrap">${esc(r.at)}</td><td>${esc(r.user_name || (r.action.includes('display') || r.action === 'auto_rilascio' ? 'Sistema / display' : '—'))}</td><td>${esc(L[r.action] || r.action.replace(/_/g, ' '))}</td><td class="small muted" style="max-width:520px;word-break:break-word">${esc(r.detail).slice(0, 220)}</td></tr>`).join('')}
+    <div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Quando (UTC)</th><th>Chi</th><th>Operazione</th><th>Dettagli</th><th></th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td class="small" style="white-space:nowrap">${esc(r.at)}</td><td>${esc(r.user_name || (r.action.includes('display') || r.action === 'auto_rilascio' ? 'Sistema / display' : '—'))}</td><td>${esc(L[r.action] || r.action.replace(/_/g, ' '))}</td><td class="small muted" style="max-width:520px;word-break:break-word">${esc(r.detail).slice(0, 220)}</td><td class="actions">${DEL(r.id)}</td></tr>`).join('')}
     </tbody></table></div></div>`;
+  $$('[data-rm]').forEach((b) => (b.onclick = () => hardDelete(`/api/admin/audit/${b.dataset.rm}`, 'Eliminare questa voce del registro?', 'La voce verrà tolta dal registro attività.', registro, 'Voce eliminata')));
 }
 
 init();
