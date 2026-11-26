@@ -45,7 +45,7 @@ function render() {
   if (s === 'in_arrivo') sub = `Prossima riunione ${minutesTo(st.next.start, n)}`;
   if (s === 'occupata') sub = `Riunione in corso fino alle ${st.current.end}`;
   if (s === 'chiusa') sub = 'Lo stabile oggi è chiuso';
-  if (s === 'fuori_orario') sub = `Prenotabile dalle ${st.open_time} alle ${st.close_time}, dal lunedì al venerdì`;
+  if (s === 'fuori_orario') sub = `Prenotabile dalle ${st.open_time} alle ${st.close_time}, dal lunedì al ${room.kind === 'palestra' && st.gym_saturday ? 'sabato' : 'venerdì'}`;
 
   const focus = st.current || (s === 'in_arrivo' ? st.next : null);
   let meeting = '';

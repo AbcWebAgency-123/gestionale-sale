@@ -18,9 +18,13 @@ function nowLocal() {
   const date = `${p.year}-${p.month}-${p.day}`; const time = `${p.hour}:${p.minute}`;
   return { date, time, min: toMin(time) };
 }
-const isClosed = (d) => [0, 6].includes(weekday(d)) || state.cfg.closures.some((c) => c.date === d);
+// sabato aperto solo per la palestra (se attivo); domenica sempre chiuso
+const satOpen = () => !!(state.cfg.gym_saturday && state.cfg.rooms.some((r) => r.kind === 'palestra'));
+const offDay = (d) => weekday(d) === 0 || (weekday(d) === 6 && !satOpen());
+const isSaturday = (d) => weekday(d) === 6;
+const isClosed = (d) => offDay(d) || state.cfg.closures.some((c) => c.date === d);
 const closureReason = (d) => (state.cfg.closures.find((c) => c.date === d) || {}).reason;
-function nextWorkday(d, dir = 1) { let x = d; for (let i = 0; i < 30; i++) { if (![0, 6].includes(weekday(x))) return x; x = addDays(x, dir); } return x; }
+function nextWorkday(d, dir = 1) { let x = d; for (let i = 0; i < 30; i++) { if (!offDay(x)) return x; x = addDays(x, dir); } return x; }
 const mondayOf = (d) => addDays(d, -((weekday(d) + 6) % 7));
 function firstBookableDay() {
   const n = nowLocal(); let d = n.date;
@@ -32,7 +36,13 @@ const slotsCount = () => (toMin(state.cfg.close_time) - toMin(state.cfg.open_tim
 const slotTime = (i) => toHHMM(toMin(state.cfg.open_time) + i * state.cfg.slot_minutes);
 const slotIndex = (t) => (toMin(t) - toMin(state.cfg.open_time)) / state.cfg.slot_minutes;
 const isGym = (r) => r && r.kind === 'palestra';
-const meetingRooms = () => state.cfg.rooms.filter((r) => !isGym(r));
+const isReception = (r) => r && r.kind === 'reception';
+const meetingRooms = () => state.cfg.rooms.filter((r) => !isGym(r) && (!isReception(r) || state.me.role === 'admin'));
+function receptionInfo(r) {
+  openModal(`<div class="modal-head"><h3>${esc(r.name)}</h3><button class="icon-btn" data-close>✕</button></div>
+    <div class="modal-body"><div class="status-card"><div class="big-icon">🛎️</div><div><b>${esc(r.name)} si prenota direttamente alla reception.</b><br><span class="muted small">È la sala per gli eventi più grandi (${r.capacity}+ posti): rivolgiti alla reception dello stabile per verificare la disponibilità e prenotarla.</span></div></div></div>
+    <div class="modal-foot"><button class="btn btn-primary" data-close>Ho capito</button></div>`);
+}
 const GENDER = { M: 'Uomo', F: 'Donna' };
 const euro = (n) => `${Number(n || 0).toFixed(2).replace('.', ',').replace(',00', '')} €`;
 async function refreshCfg() { try { state.cfg = await api('/api/config'); } catch { /* */ } }
@@ -124,8 +134,8 @@ function renderCalendarShell() {
       <span><i style="background:repeating-linear-gradient(-45deg,#fafbfd,#fafbfd 3px,#eceff5 3px,#eceff5 6px);border-color:var(--line)"></i>Orario passato</span>
       <span style="margin-left:auto">Suggerimento: clicca su uno spazio libero, oppure trascina per scegliere più mezz'ore. In palestra si prenota un'ora alla volta.</span>
     </div>`;
-  $('#prev').onclick = () => { let d = addDays(state.date, -1); while ([0, 6].includes(weekday(d))) d = addDays(d, -1); go(d); };
-  $('#next').onclick = () => { let d = addDays(state.date, 1); while ([0, 6].includes(weekday(d))) d = addDays(d, 1); go(d); };
+  $('#prev').onclick = () => { let d = addDays(state.date, -1); while (offDay(d)) d = addDays(d, -1); go(d); };
+  $('#next').onclick = () => { let d = addDays(state.date, 1); while (offDay(d)) d = addDays(d, 1); go(d); };
   $('#today').onclick = () => go(nextWorkday(nowLocal().date));
   $('#pick-date').onchange = (e) => e.target.value && go(nextWorkday(e.target.value));
   $('#new-bk').onclick = () => bookingModal({ date: state.date });
@@ -136,8 +146,8 @@ function go(d) { state.date = d; loadDay(); }
 async function loadDay() {
   if (!$('#grid-wrap')) return;
   const mon = mondayOf(state.date);
-  state.week = [0, 1, 2, 3, 4].map((i) => addDays(mon, i));
-  try { state.bookings = await api(`/api/bookings?from=${state.week[0]}&to=${state.week[4]}`); }
+  state.week = (satOpen() ? [0, 1, 2, 3, 4, 5] : [0, 1, 2, 3, 4]).map((i) => addDays(mon, i));
+  try { state.bookings = await api(`/api/bookings?from=${state.week[0]}&to=${state.week[state.week.length - 1]}`); }
   catch (e) { if (e.status === 401) location.reload(); toast(e.message, 'err'); return; }
   renderGrid();
 }
@@ -158,10 +168,11 @@ function renderGrid() {
 
   const wrap = $('#grid-wrap');
   if (isClosed(d)) {
-    wrap.innerHTML = `<div class="closed-banner"><div class="big">🏢</div><h3>Stabile chiuso</h3><p class="muted">${esc(closureReason(d) || 'Le sale sono prenotabili dal lunedì al venerdì.')}</p></div>`;
+    wrap.innerHTML = `<div class="closed-banner"><div class="big">🏢</div><h3>Stabile chiuso</h3><p class="muted">${esc(closureReason(d) || (satOpen() ? 'Le sale sono prenotabili dal lunedì al venerdì, la palestra anche il sabato.' : 'Le sale sono prenotabili dal lunedì al venerdì.'))}</p></div>`;
     return;
   }
-  const rooms = cfg.rooms; const N = slotsCount(); const cols = `64px repeat(${rooms.length}, minmax(150px, 1fr))`;
+  // il sabato è aperta solo la palestra
+  const rooms = isSaturday(d) ? cfg.rooms.filter(isGym) : cfg.rooms; const N = slotsCount(); const cols = `64px repeat(${rooms.length}, minmax(150px, 1fr))`;
   const dayBookings = state.bookings.filter((b) => b.date === d);
   const isToday = d === n.date;
   const isPastSlot = (i) => d < n.date || (isToday && toMin(slotTime(i)) + cfg.slot_minutes <= n.min);
@@ -174,11 +185,12 @@ function renderGrid() {
       const busy = busyAll[0];
       if (isGym(r)) badge = busyAll.length >= 2 ? '<span class="status-badge st-occupata">Completa adesso</span>' : busyAll.length ? '<span class="status-badge st-neutral">1 posto libero adesso</span>' : '<span class="status-badge st-libera">Libera ora</span>';
       else badge = busy ? `<span class="status-badge st-occupata">Occupata fino alle ${busy.end}</span>` : '<span class="status-badge st-libera">Libera ora</span>';
+      if (isReception(r) && !busy) badge = '';
     }
     const gymRule = { uno_per_sesso: '1 uomo + 1 donna per ora', stesso_sesso: 'max 2 persone dello stesso sesso', misto: `max ${r.capacity} persone per ora` }[cfg.gym_rule] || '';
     head += `<div class="room-head" title="${esc(r.equipment)}">
       <div class="rh-top"><span class="swatch" style="background:${r.color}"></span><b>${isGym(r) ? '🏋️ ' : ''}${esc(r.name)}</b></div>
-      <div class="meta">${isGym(r) ? `<span>${gymRule}</span>` : `<span>${ICON.people} ${r.capacity} posti</span>${r.location ? `<span>${ICON.pin} ${esc(r.location)}</span>` : ''}`}</div>${badge}
+      <div class="meta">${isGym(r) ? `<span>${gymRule}</span>` : `<span>${ICON.people} ${r.capacity}${isReception(r) ? '+' : ''} posti</span>${r.location ? `<span>${ICON.pin} ${esc(r.location)}</span>` : ''}`}</div>${isReception(r) ? '<span class="status-badge st-neutral">🛎️ Prenotazione alla reception</span>' : badge}
       ${isGym(r) && cfg.gym_rule === 'uno_per_sesso' ? '<div class="gym-sub"><span>Uomo</span><span>Donna</span></div>' : ''}</div>`;
   }
   head += '</div>';
@@ -188,7 +200,7 @@ function renderGrid() {
     const t = slotTime(i); const isHour = t.endsWith(':00');
     body += `<div class="time-col ${i === 0 ? 'first' : ''}" style="grid-row:${i + 1};grid-column:1">${isHour || i === 0 ? t : ''}</div>`;
     rooms.forEach((r, ri) => {
-      body += `<div class="slot ${isHour ? 'hour' : ''} ${isPastSlot(i) ? 'past' : ''}" style="grid-row:${i + 1};grid-column:${ri + 2}" data-room="${r.id}" data-i="${i}" data-t="${t}"></div>`;
+      body += `<div class="slot ${isHour ? 'hour' : ''} ${isPastSlot(i) ? 'past' : ''} ${isReception(r) && state.me.role !== 'admin' ? 'reception' : ''}" style="grid-row:${i + 1};grid-column:${ri + 2}" data-room="${r.id}" data-i="${i}" data-t="${t}"></div>`;
     });
   }
   for (const b of dayBookings) {
@@ -227,6 +239,7 @@ function renderGrid() {
   };
   grid.addEventListener('pointerdown', (e) => {
     const s = e.target.closest('.slot'); if (!s || s.classList.contains('past') || e.button !== 0) return;
+    if (s.classList.contains('reception')) return receptionInfo(cfg.rooms.find((x) => x.id === +s.dataset.room));
     sel = { room: +s.dataset.room, a: +s.dataset.i, b: +s.dataset.i }; paint();
     grid.setPointerCapture?.(e.pointerId);
   });
@@ -341,7 +354,8 @@ async function bookingModal(b, onClose) {
     const q = cfg.quota;
     $('#bk-summary', m.el).innerHTML = d ? `${ICON.cal} ${fmtDateLong(d)} · ${a}–${z} · ${dur(a, z)}${q && q.limit != null && !isAdmin ? ` · restano ${fmtHours(q.remaining + (editing ? (toMin(b.end) - toMin(b.start)) / 60 : 0))} questo mese` : ''}` : '';
     let warn = '';
-    if (d && isClosed(d)) warn = [0, 6].includes(weekday(d)) ? 'Le sale sono prenotabili solo dal lunedì al venerdì.' : `Lo stabile è chiuso: ${closureReason(d) || 'chiusura'}.`;
+    if (d && isClosed(d)) warn = offDay(d) ? 'Le sale sono prenotabili solo dal lunedì al venerdì.' : `Lo stabile è chiuso: ${closureReason(d) || 'chiusura'}.`;
+    else if (d && isSaturday(d)) warn = 'Il sabato è prenotabile solo la palestra: le sale riunioni sono disponibili dal lunedì al venerdì.';
     const list = d && !warn ? await dayList(d) : [];
     $('#room-pick', m.el).innerHTML = meetingRooms().map((r) => {
       const busy = list.find((x) => x.room_id === r.id && x.id !== b.id && x.start < z && x.end > a);
@@ -353,7 +367,7 @@ async function bookingModal(b, onClose) {
         <span class="avail ${busy ? 'ko' : 'ok'}">${warn ? '—' : busy ? `Occupata ${busy.start}–${busy.end}` : '● Disponibile'}</span>
         <span class="cap-warn">Troppo piccola per ${att} persone</span>
       </label>`;
-    }).join('') + (!editing && cfg.rooms.some(isGym) ? `<button type="button" class="room-opt gym-opt" id="to-gym"><b><i style="background:${cfg.rooms.find(isGym).color}"></i>🏋️ ${esc(cfg.rooms.find(isGym).name)}</b><small>Prenotazione a persona, un'ora alla volta</small><span class="avail ok">Prenota la palestra →</span></button>` : '');
+    }).join('') + (state.me.role !== 'admin' ? cfg.rooms.filter(isReception).map((r) => `<div class="room-opt reception-opt"><b><i style="background:${r.color}"></i>${esc(r.name)}</b><small>${r.capacity}+ posti</small><span class="avail">🛎️ Si prenota alla reception</span></div>`).join('') : '') + (!editing && cfg.rooms.some(isGym) ? `<button type="button" class="room-opt gym-opt" id="to-gym"><b><i style="background:${cfg.rooms.find(isGym).color}"></i>🏋️ ${esc(cfg.rooms.find(isGym).name)}</b><small>Prenotazione a persona, un'ora alla volta</small><span class="avail ok">Prenota la palestra →</span></button>` : '');
     $$('.room-opt input', m.el).forEach((i) => i.onchange = () => { f.room_id = +i.value; $$('.room-opt', m.el).forEach((x) => x.classList.toggle('checked', x.contains(i))); });
     $('#to-gym', m.el)?.addEventListener('click', () => { const d = form.date.value; const st = sStart.value; m.close(); setTimeout(() => gymFlow({ date: d, start: toHHMM(Math.floor(toMin(st) / 60) * 60) }), 220); });
     $('#bk-err', m.el).textContent = warn;
@@ -450,6 +464,8 @@ async function renderMine() {
           ${data.penalties.map((p) => `<div class="pen-item"><span>${p.date ? fmtDateShort(p.date) + ' · ' + esc(p.room_name || '') : ''}<br><small class="muted">${p.reason === 'cancellazione_tardiva' ? 'Annullamento tardivo' : 'Non utilizzata'}${p.user_name ? ' · ' + esc(p.user_name) : ''}${p.status === 'addebitata' ? ' · addebitata' : ''}</small></span><b>${euro(p.amount)}</b></div>`).join('')}</div>` : ''}
         <div class="card card-pad side-card"><h3>Regole di utilizzo</h3><ul class="rules">
           <li>Sale prenotabili dal <b>lunedì al venerdì</b>, dalle <b>${state.cfg.open_time}</b> alle <b>${state.cfg.close_time}</b>.</li>
+          ${state.cfg.rooms.filter(isReception).map((r) => `<li><b>${esc(r.name)}</b> (${r.capacity}+ posti) si prenota direttamente <b>alla reception</b>.</li>`).join('')}
+          ${state.cfg.rooms.some(isGym) ? `<li>Palestra: un'ora alla volta${satOpen() ? ', <b>dal lunedì al sabato</b>' : ''}${state.cfg.gym_weekly_hours ? `, massimo <b>${state.cfg.gym_weekly_hours} ore a settimana</b> per persona` : ''}. Non scala dal monte ore.</li>` : ''}
           <li>Blocchi da ${state.cfg.slot_minutes} minuti, massimo ${String(state.cfg.max_hours_per_booking).replace('.', ',')} ore per prenotazione.</li>
           <li>Prenotazione fino a ${state.cfg.max_advance_days} giorni in anticipo.</li>
           ${q && q.limit != null ? `<li>Ogni azienda ha <b>${fmtHours(q.limit)} di sala al mese</b>; superata la soglia non si può più prenotare fino al mese successivo.</li>` : ''}
@@ -537,6 +553,7 @@ async function gymModal({ date, start }) {
       <label class="field"><span>Ora</span><select name="start"></select></label></div>
       <div class="field" style="margin-bottom:6px"><span>Accesso</span></div>
       <div class="gender-pick" id="gp"></div>
+      <div class="summary-pill" id="g-week"></div>
       <p class="muted small" style="margin:0">${{ uno_per_sesso: 'In ogni ora possono allenarsi al massimo un uomo e una donna.', stesso_sesso: 'In ogni ora massimo 2 persone dello stesso sesso.', misto: `In ogni ora massimo ${gym.capacity} persone.` }[cfg.gym_rule] || ''} Ricordati di confermare la presenza sul tablet all'ingresso.</p>
       <div class="form-error" id="g-err"></div>
     </form>
@@ -555,7 +572,14 @@ async function gymModal({ date, start }) {
     const busyG = (g) => cfg.gym_rule === 'uno_per_sesso' ? taken(t, g).length > 0 : cfg.gym_rule === 'stesso_sesso' ? taken(t).some((x) => x.gender !== g) || taken(t).length >= 2 : taken(t).length >= gym.capacity;
     $('#gp', m.el).innerHTML = ['M', 'F'].map((g) => `<label class="gender-opt ${gender === g ? 'checked' : ''} ${busyG(g) ? 'busy' : ''}"><input type="radio" name="gender" value="${g}" ${gender === g ? 'checked' : ''} ${busyG(g) ? 'disabled' : ''}><span class="g-ico">${g === 'M' ? '🙋‍♂️' : '🙋‍♀️'}</span><b>${GENDER[g]}</b><small class="${busyG(g) ? 'ko' : 'ok'}">${busyG(g) ? 'Posto occupato' : '● Posto libero'}</small></label>`).join('');
     $$('#gp input', m.el).forEach((i) => i.onchange = () => { gender = i.value; refresh(); });
-    $('#g-err', m.el).textContent = isClosed(d) ? 'La palestra è prenotabile dal lunedì al venerdì, esclusi i giorni di chiusura.' : '';
+    $('#g-err', m.el).textContent = isClosed(d) ? `La palestra è prenotabile dal lunedì al ${satOpen() ? 'sabato' : 'venerdì'}, esclusi i giorni di chiusura.` : '';
+    const lim = cfg.gym_weekly_hours;
+    if (lim && state.me.role !== 'admin') {
+      const mon = mondayOf(d);
+      const used = (await api(`/api/gym/week?date=${d}`).catch(() => ({ used: 0 }))).used;
+      $('#g-week', m.el).innerHTML = `🏋️ Settimana dal ${fmtDateShort(mon)}: <b>&nbsp;${String(used).replace('.', ',')} di ${lim} ore&nbsp;</b> prenotate`;
+      $('#g-week', m.el).style.color = used >= lim ? 'var(--accent)' : '';
+    } else $('#g-week', m.el).style.display = 'none';
   };
   form.date.onchange = refresh; form.start.onchange = refresh;
   await refresh();

@@ -124,6 +124,7 @@ addColumn('users', 'reset_token', 'TEXT');
 addColumn('users', 'reset_expires', 'INTEGER');
 addColumn('users', 'self_registered', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('users', 'gender', 'TEXT');
+addColumn('users', 'approval', "TEXT NOT NULL DEFAULT 'approvato'");
 addColumn('users', 'gym_waiver_status', "TEXT NOT NULL DEFAULT 'nessuno'");
 addColumn('users', 'gym_waiver_file', 'TEXT');
 addColumn('users', 'gym_waiver_at', 'TEXT');
@@ -157,6 +158,9 @@ const DEFAULT_SETTINGS = {
   cancel_notice_hours: '24',         // preavviso minimo per annullare senza penale
   gym_rule: 'uno_per_sesso',         // uno_per_sesso | stesso_sesso | misto
   gym_waiver_email: 'info@ufficicardo.com',
+  registration_approval: '1',        // ogni iscrizione va approvata dall'amministrazione
+  gym_saturday: '1',                 // la palestra è prenotabile anche il sabato
+  gym_weekly_hours: '3',             // ore di palestra a settimana per persona (vuoto/0 = illimitate)
   checkin_enabled_at: '',
   lobby_token: crypto.randomBytes(16).toString('hex'),
 };
@@ -179,6 +183,8 @@ function S() {
     maxRepeat: parseInt(s.max_repeat_weeks, 10) || 0,
     checkin: s.checkin_required === '1',
     grace: parseInt(s.checkin_grace_minutes, 10) || 15,
+    gymSaturday: s.gym_saturday === '1',
+    gymWeekly: parseFloat(String(s.gym_weekly_hours || '').replace(',', '.')) || 0,
   };
 }
 
@@ -228,11 +234,10 @@ function seed() {
   const roomCount = db.prepare('SELECT COUNT(*) c FROM rooms').get().c;
   if (roomCount === 0) {
     const rooms = [
-      ['Sala Verdi', 12, 'Piano terra', 'Schermo 75", videoconferenza, lavagna', '#0a615f'],
-      ['Sala Puccini', 8, 'Piano terra', 'Schermo 55", videoconferenza', '#a7406b'],
-      ['Sala Rossini', 6, 'Primo piano', 'Schermo 55"', '#b9771f'],
-      ['Palestra', 2, 'Primo piano', 'Tapis roulant, pesi, panca', '#5b8a72', 'palestra'],
-      ['Sala Conferenze', 30, 'Secondo piano', 'Proiettore, microfoni, impianto audio', '#4a5a86'],
+      ['B2B', 6, '', '', '#b9771f'],
+      ['Sala White', 14, '', '', '#0a615f'],
+      ['Sala Cardo', 30, '', 'Oltre 30 posti · prenotazione alla reception', '#a7406b', 'reception'],
+      ['Palestra', 2, '', 'Tapis roulant, pesi, panca', '#5b8a72', 'palestra'],
     ];
     const ins = db.prepare('INSERT INTO rooms(name,capacity,location,equipment,color,kind,display_token,sort_order) VALUES (?,?,?,?,?,?,?,?)');
     rooms.forEach((r, i) => ins.run(r[0], r[1], r[2], r[3], r[4], r[5] || 'sala', crypto.randomBytes(16).toString('hex'), i));
@@ -334,6 +339,34 @@ seed();
     }
     db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES ('mig_gym','1')").run();
   }
+  // v3: sale definitive dello stabile (B2B, Sala White, Sala Cardo alla reception) + Palestra
+  if (getSettings().mig_rooms_v3 !== '1') {
+    const want = [
+      ['B2B', 6, 'sala', '#b9771f', ''],
+      ['Sala White', 14, 'sala', '#0a615f', ''],
+      ['Sala Cardo', 30, 'reception', '#a7406b', 'Oltre 30 posti · prenotazione alla reception'],
+    ];
+    const existing = db.prepare("SELECT * FROM rooms WHERE kind<>'palestra' ORDER BY active DESC, sort_order, id").all();
+    const used = new Set();
+    want.forEach(([name, cap, kind, color, equip], i) => {
+      const r = existing.find((x) => x.name === name && !used.has(x.id)) || existing.find((x) => !used.has(x.id));
+      if (r) {
+        used.add(r.id);
+        db.prepare('UPDATE rooms SET name=?,capacity=?,kind=?,color=?,equipment=?,location=?,sort_order=?,active=1 WHERE id=?').run(name, cap, kind, color, equip, '', i, r.id);
+      } else {
+        db.prepare('INSERT INTO rooms(name,capacity,location,equipment,color,kind,display_token,sort_order) VALUES (?,?,?,?,?,?,?,?)').run(name, cap, '', equip, color, kind, crypto.randomBytes(16).toString('hex'), i);
+      }
+    });
+    // le sale che non esistono più vengono disattivate e le loro prenotazioni future annullate
+    for (const r of existing.filter((x) => !used.has(x.id))) {
+      db.prepare("UPDATE bookings SET status='cancellata', cancelled_at=CURRENT_TIMESTAMP WHERE room_id=? AND status='confermata' AND date>=?").run(r.id, now().date);
+      db.prepare('UPDATE rooms SET active=0 WHERE id=?').run(r.id);
+    }
+    // sulle sale rinominate le prenotazioni future di prova non sono più valide
+    for (const id of used) db.prepare("UPDATE bookings SET status='cancellata', cancelled_at=CURRENT_TIMESTAMP WHERE room_id=? AND status='confermata' AND date>=?").run(id, now().date);
+    db.prepare("UPDATE rooms SET sort_order=3, location='' WHERE kind='palestra'").run();
+    db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES ('mig_rooms_v3','1')").run();
+  }
 })();
 
 // ---------------------------------------------------------------- email
@@ -409,11 +442,20 @@ function autoRelease() {
 }
 setInterval(autoRelease, 30 * 1000);
 
-function bookingWindowIssues({ date, start, end }, s, { isAdmin = false, ignorePast = false } = {}) {
+// Giorni di apertura: sale dal lunedì al venerdì; la palestra anche il sabato (se attivo)
+function dayOpenFor(room, date, s = S()) {
+  const wd = weekday(date);
+  if (wd === 0) return false;
+  if (wd === 6) return !!(room && room.kind === 'palestra' && s.gymSaturday);
+  return true;
+}
+function bookingWindowIssues({ date, start, end }, s, { isAdmin = false, ignorePast = false, room = null } = {}) {
   if (!isDate(date)) return 'Data non valida';
   if (!isTime(start) || !isTime(end)) return 'Orario non valido';
-  const wd = weekday(date);
-  if (wd === 0 || wd === 6) return 'Le sale sono prenotabili solo dal lunedì al venerdì';
+  if (!dayOpenFor(room, date, s)) {
+    if (room && room.kind === 'palestra') return s.gymSaturday ? 'La palestra è prenotabile dal lunedì al sabato' : 'La palestra è prenotabile dal lunedì al venerdì';
+    return weekday(date) === 6 && s.gymSaturday ? 'Il sabato è prenotabile solo la palestra: le sale riunioni sono disponibili dal lunedì al venerdì' : 'Le sale sono prenotabili solo dal lunedì al venerdì';
+  }
   const closure = db.prepare('SELECT reason FROM closures WHERE date=?').get(date);
   if (closure) return `Lo stabile è chiuso in questa data${closure.reason ? ' (' + closure.reason + ')' : ''}`;
   const a = toMin(start), b = toMin(end), open = toMin(s.open_time), close = toMin(s.close_time);
@@ -437,7 +479,7 @@ function conflict(roomId, date, start, end, excludeId = 0) {
 // Ore di sala usate nel mese (la palestra non scala dal monte ore)
 function companyHoursInMonth(companyId, month, excludeId = 0) {
   const rows = db.prepare(`SELECT b.start,b.end FROM bookings b JOIN rooms r ON r.id=b.room_id
-    WHERE b.company_id=? AND b.status='confermata' AND r.kind<>'palestra' AND substr(b.date,1,7)=? AND b.id<>?`).all(companyId, month, excludeId);
+    WHERE b.company_id=? AND b.status='confermata' AND r.kind='sala' AND substr(b.date,1,7)=? AND b.id<>?`).all(companyId, month, excludeId);
   return rows.reduce((t, r) => t + (toMin(r.end) - toMin(r.start)) / 60, 0);
 }
 function effectiveQuota(companyId) {
@@ -478,10 +520,27 @@ function gymIssue(room, date, start, end, gender, userId, excludeId = 0) {
   if (rule === 'stesso_sesso' && rows.some((r) => r.gender && r.gender !== gender)) return `In quest'ora la palestra è già prenotata da ${gender === 'F' ? 'uomini' : 'donne'}`;
   return null;
 }
+// Limite settimanale di palestra per persona (settimana dal lunedì alla domenica)
+const mondayOf = (d) => addDays(d, -((weekday(d) + 6) % 7));
+function gymHoursInWeek(userId, date, excludeId = 0) {
+  const mon = mondayOf(date);
+  const rows = db.prepare(`SELECT b.start,b.end FROM bookings b JOIN rooms r ON r.id=b.room_id
+    WHERE b.user_id=? AND r.kind='palestra' AND b.status IN ('confermata','liberata') AND b.date BETWEEN ? AND ? AND b.id<>?`).all(userId, mon, addDays(mon, 6), excludeId);
+  return rows.reduce((t, r) => t + (toMin(r.end) - toMin(r.start)) / 60, 0);
+}
+function gymWeeklyIssue(userId, date, start, end, s) {
+  if (!s.gymWeekly) return null;
+  const used = gymHoursInWeek(userId, date);
+  const add = (toMin(end) - toMin(start)) / 60;
+  const lim = fmtH(s.gymWeekly);
+  if (used >= s.gymWeekly - 1e-9) return `Hai già prenotato ${lim} ${s.gymWeekly === 1 ? 'ora' : 'ore'} di palestra nella settimana del ${mondayOf(date).slice(8)}/${mondayOf(date).slice(5, 7)}: il massimo è ${lim} ore a settimana per persona`;
+  if (used + add > s.gymWeekly + 1e-9) return `Puoi prenotare la palestra al massimo ${lim} ore a settimana`;
+  return null;
+}
 function activeIssue(companyId, s, adding = 1) {
   if (!companyId || !s.maxActive) return null;
   const n = now();
-  const cnt = db.prepare(`SELECT COUNT(*) c FROM bookings b JOIN rooms r ON r.id=b.room_id WHERE b.company_id=? AND b.status='confermata' AND r.kind<>'palestra' AND (b.date>? OR (b.date=? AND b.end>?))`).get(companyId, n.date, n.date, n.time).c;
+  const cnt = db.prepare(`SELECT COUNT(*) c FROM bookings b JOIN rooms r ON r.id=b.room_id WHERE b.company_id=? AND b.status='confermata' AND r.kind='sala' AND (b.date>? OR (b.date=? AND b.end>?))`).get(companyId, n.date, n.date, n.time).c;
   if (cnt + adding > s.maxActive) return `La tua azienda ha già ${cnt} prenotazioni attive (massimo ${s.maxActive})`;
   return null;
 }
@@ -563,7 +622,7 @@ function displayAuth(token) {
 }
 function roomState(room, s, n) {
   const list = db.prepare(`${BOOKING_SELECT} WHERE b.room_id=? AND b.date=? AND b.status='confermata' ORDER BY b.start`).all(room.id, n.date);
-  const open = n.date && ![0, 6].includes(weekday(n.date)) && !db.prepare('SELECT 1 FROM closures WHERE date=?').get(n.date);
+  const open = n.date && dayOpenFor(room, n.date) && !db.prepare('SELECT 1 FROM closures WHERE date=?').get(n.date);
   const items = list.map((b) => ({
     id: b.id, start: b.start, end: b.end,
     title: s.display_show_title === '1' ? b.title : 'Riunione',
@@ -599,6 +658,7 @@ route('POST', '/api/login', async (req, res, ctx) => {
   checkRate(req.socket.remoteAddress + '|' + str(email).toLowerCase());
   const u = db.prepare(`SELECT u.*, c.active company_active FROM users u LEFT JOIN companies c ON c.id=u.company_id WHERE email=?`).get(str(email));
   need(!(u && !u.email_verified), 403, "Non hai ancora confermato l'iscrizione: apri il link che ti abbiamo inviato via email (controlla anche lo spam).");
+  need(!(u && u.approval === 'in_attesa'), 403, "La tua iscrizione è in attesa di approvazione da parte dell'amministrazione: riceverai un'email con la password appena sarà approvata.");
   need(u && u.active && verifyPassword(String(password || ''), u.password_hash), 401, 'Email o password non corretti');
   need(!(u.company_id && u.company_active === 0), 403, "L'azienda risulta disattivata. Contatta l'amministrazione dello stabile.");
   const token = crypto.randomBytes(32).toString('hex');
@@ -636,6 +696,9 @@ route('GET', '/api/config', (req, res, ctx) => {
     quota: quotaInfo(ctx.user.company_id),
     penalties: penaltyCfg(),
     gym_rule: s.gym_rule,
+    gym_saturday: s.gym_saturday === '1',
+    gym_weekly_hours: parseFloat(String(s.gym_weekly_hours || '').replace(',', '.')) || 0,
+    gym_week: { this: +gymHoursInWeek(ctx.user.id, n.date).toFixed(2), monday: mondayOf(n.date) },
     rooms: roomsList(),
     closures: db.prepare('SELECT date,reason FROM closures WHERE date>=? ORDER BY date').all(addDays(n.date, -31)),
     now: n,
@@ -651,6 +714,11 @@ route('GET', '/api/bookings', (req, res, ctx) => {
   const s = getSettings();
   const rows = db.prepare(`${BOOKING_SELECT} WHERE b.date BETWEEN ? AND ? AND b.status='confermata' ORDER BY b.date,b.start`).all(from, to);
   send(res, 200, rows.map((b) => bookingView(b, ctx.user, s)));
+});
+route('GET', '/api/gym/week', (req, res, ctx) => {
+  const d = ctx.query.get('date'); need(isDate(d), 400, 'Data non valida');
+  const s = S();
+  send(res, 200, { monday: mondayOf(d), used: +gymHoursInWeek(ctx.user.id, d).toFixed(2), limit: s.gymWeekly || null });
 });
 route('GET', '/api/bookings/mine', (req, res, ctx) => {
   const s = getSettings(); const n = now();
@@ -675,6 +743,7 @@ function createBookings(ctx, body) {
   const room = db.prepare('SELECT * FROM rooms WHERE id=? AND active=1').get(roomId);
   need(room, 400, 'Sala non valida');
   const gym = room.kind === 'palestra';
+  need(isAdmin || room.kind !== 'reception', 403, `${room.name} si prenota direttamente alla reception`);
   let gender = null;
   if (gym) {
     gender = ['M', 'F'].includes(body.gender) ? body.gender : ctx.user.gender;
@@ -691,10 +760,11 @@ function createBookings(ctx, body) {
   const attendees = gym ? 1 : (body.attendees ? Math.max(0, parseInt(body.attendees, 10) || 0) : null);
   const repeat = Math.min(Math.max(parseInt(body.repeat_weeks, 10) || 0, 0), s.maxRepeat);
   const dates = [body.date]; for (let i = 1; i <= repeat; i++) dates.push(addDays(body.date, 7 * i));
-  const first = bookingWindowIssues({ date: body.date, start: body.start, end: body.end }, s, { isAdmin });
+  const first = bookingWindowIssues({ date: body.date, start: body.start, end: body.end }, s, { isAdmin, room });
   need(!first, 400, first);
   if (gym) {
     const g = gymIssue(room, body.date, body.start, body.end, gender, ctx.user.id); need(!g, 409, g);
+    if (!isAdmin) { const w = gymWeeklyIssue(ctx.user.id, body.date, body.start, body.end, s); need(!w, 400, w); }
   } else {
     const c0 = conflict(roomId, body.date, body.start, body.end);
     need(!c0, 409, `La sala è già occupata dalle ${c0?.start} alle ${c0?.end}${c0?.company ? ' (' + c0.company + ')' : ''}`);
@@ -709,8 +779,9 @@ function createBookings(ctx, body) {
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const d of dates) {
-      const issue = bookingWindowIssues({ date: d, start: body.start, end: body.end }, s, { isAdmin })
+      const issue = bookingWindowIssues({ date: d, start: body.start, end: body.end }, s, { isAdmin, room })
         || (gym ? gymIssue(room, d, body.start, body.end, gender, ctx.user.id) : (conflict(roomId, d, body.start, body.end) ? 'sala già occupata' : null))
+        || (gym && !isAdmin ? gymWeeklyIssue(ctx.user.id, d, body.start, body.end, s) : null)
         || (!isAdmin && !gym ? quotaIssue(companyId, d, body.start, body.end) : null)
         || (!isAdmin && !gym && created.length ? activeIssue(companyId, s, 1) : null);
       if (issue) { skipped.push({ date: d, reason: issue }); continue; }
@@ -760,10 +831,11 @@ route('PUT', '/api/bookings/:id', (req, res, ctx) => {
   const newRoom = db.prepare('SELECT * FROM rooms WHERE id=? AND active=1').get(nb.room_id);
   need(newRoom, 400, 'Sala non valida');
   need(oldRoom.kind !== 'palestra' && newRoom.kind !== 'palestra', 400, 'Le prenotazioni della palestra non si modificano: annulla e prenota di nuovo');
+  need(isAdmin || newRoom.kind !== 'reception' || nb.room_id === b.room_id, 403, `${newRoom.name} si prenota direttamente alla reception`);
   const changedSlot = nb.room_id !== b.room_id || nb.date !== b.date || nb.start !== b.start || nb.end !== b.end;
   if (changedSlot) {
     // se la riunione è in corso si può solo allungare/accorciare la fine
-    const issue = bookingWindowIssues(nb, s, { isAdmin, ignorePast: b.date === n.date && toMin(b.start) <= n.min && nb.start === b.start && nb.date === b.date });
+    const issue = bookingWindowIssues(nb, s, { isAdmin, room: newRoom, ignorePast: b.date === n.date && toMin(b.start) <= n.min && nb.start === b.start && nb.date === b.date });
     need(!issue, 400, issue);
     const c = conflict(nb.room_id, nb.date, nb.start, nb.end, b.id);
     need(!c, 409, `La sala è già occupata dalle ${c?.start} alle ${c?.end}${c?.company ? ' (' + c.company + ')' : ''}`);
@@ -906,10 +978,54 @@ route('PUT', '/api/admin/users/:id', (req, res, ctx) => {
   need(!(id === ctx.user.id && (f.role !== 'admin' || !f.active)), 400, 'Non puoi togliere i permessi di amministratore a te stesso');
   try {
     db.prepare('UPDATE users SET company_id=?,name=?,email=?,role=?,active=? WHERE id=?').run(f.companyId, f.name, f.email, f.role, f.active, id);
-    if (f.active) db.prepare('UPDATE users SET email_verified=1, verify_token=NULL WHERE id=? AND email_verified=0').run(id);
+    if (f.active) db.prepare("UPDATE users SET email_verified=1, verify_token=NULL, approval='approvato' WHERE id=? AND (email_verified=0 OR approval<>'approvato')").run(id);
   } catch (e) { if (String(e.message).includes('UNIQUE')) throw new HttpError(409, 'Email già registrata'); throw e; }
   if (!f.active) db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);
   audit(ctx.user.id, 'utente_modificato', id); send(res, 200, { ok: true });
+}, A);
+// --- iscrizioni da approvare
+function adminRecipients() {
+  const n = String(getSettings().admin_notify_email || '').trim();
+  if (n) return [n];
+  return db.prepare("SELECT email FROM users WHERE role='admin' AND active=1").all().map((r) => r.email).filter((e) => EMAIL_RE.test(e) && !e.endsWith('.local'));
+}
+route('GET', '/api/admin/registrations', (req, res) => {
+  const rows = db.prepare(`SELECT u.id,u.name,u.first_name,u.last_name,u.email,u.role,u.created_at,u.company_id,c.name company_name,
+      (SELECT COUNT(*) FROM users x WHERE x.company_id=u.company_id AND x.id<>u.id AND x.active=1) members
+    FROM users u LEFT JOIN companies c ON c.id=u.company_id WHERE u.approval='in_attesa' AND u.email_verified=1 ORDER BY u.id`).all();
+  const unconfirmed = db.prepare("SELECT COUNT(*) c FROM users WHERE approval='in_attesa' AND email_verified=0").get().c;
+  send(res, 200, { pending: rows.map((r) => ({ ...r, new_company: !r.members })), unconfirmed });
+}, A);
+route('POST', '/api/admin/registrations/:id/approve', (req, res, ctx) => {
+  const u = db.prepare('SELECT u.*, c.name company_name FROM users u LEFT JOIN companies c ON c.id=u.company_id WHERE u.id=?').get(+ctx.params.id);
+  need(u && u.approval === 'in_attesa', 404, 'Richiesta non trovata o già gestita');
+  need(u.email_verified, 400, "L'utente non ha ancora confermato la sua email");
+  const pw = randomPassword();
+  const hasMembers = u.company_id && db.prepare('SELECT 1 FROM users WHERE company_id=? AND id<>? AND active=1').get(u.company_id, u.id);
+  const role = u.role === 'admin' ? 'admin' : hasMembers ? u.role : 'referente';
+  db.prepare("UPDATE users SET password_hash=?, active=1, approval='approvato', must_change_password=0, role=? WHERE id=?").run(hashPassword(pw), role, u.id);
+  if (u.company_id) db.prepare('UPDATE companies SET active=1 WHERE id=?').run(u.company_id);
+  sendMail(u.email, 'welcome', { name: u.first_name || u.name, company: u.company_name || '', email: u.email, password: pw, quota: u.company_id ? effectiveQuota(u.company_id) : null });
+  audit(ctx.user.id, 'iscrizione_approvata', u.email); broadcast();
+  send(res, 200, { ok: true });
+}, A);
+route('POST', '/api/admin/registrations/:id/reject', (req, res, ctx) => {
+  const u = db.prepare('SELECT u.*, c.name company_name FROM users u LEFT JOIN companies c ON c.id=u.company_id WHERE u.id=?').get(+ctx.params.id);
+  need(u && u.approval === 'in_attesa', 404, 'Richiesta non trovata o già gestita');
+  const note = str(ctx.body.note, 500);
+  if (u.email_verified) sendMail(u.email, 'registrationRejected', { name: u.first_name || u.name, company: u.company_name || '', note });
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM sessions WHERE user_id=?').run(u.id);
+    db.prepare('DELETE FROM users WHERE id=?').run(u.id);
+    // un'azienda creata solo da questa richiesta viene rimossa
+    if (u.company_id && !db.prepare('SELECT 1 FROM users WHERE company_id=?').get(u.company_id) && !db.prepare('SELECT 1 FROM bookings WHERE company_id=?').get(u.company_id)) {
+      db.prepare('DELETE FROM companies WHERE id=?').run(u.company_id);
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  audit(ctx.user.id, 'iscrizione_rifiutata', { email: u.email, note }); broadcast();
+  send(res, 200, { ok: true });
 }, A);
 route('POST', '/api/admin/users/:id/reset-password', (req, res, ctx) => {
   const pw = randomPassword(); const id = +ctx.params.id;
@@ -957,7 +1073,7 @@ function roomFields(b) {
   const name = str(b.name, 80); need(name, 400, 'Nome sala obbligatorio');
   const cap = parseInt(b.capacity, 10); need(cap > 0, 400, 'Capienza non valida');
   const color = /^#[0-9a-f]{6}$/i.test(b.color || '') ? b.color : '#2563eb';
-  const kind = b.kind === 'palestra' ? 'palestra' : 'sala';
+  const kind = ['palestra', 'reception'].includes(b.kind) ? b.kind : 'sala';
   return [name, kind === 'palestra' ? Math.min(cap, 2) : cap, str(b.location), str(b.equipment, 300), color, parseInt(b.sort_order, 10) || 0, b.active === false || b.active === 0 ? 0 : 1, kind];
 }
 route('POST', '/api/admin/rooms', (req, res, ctx) => {
@@ -999,7 +1115,7 @@ route('DELETE', '/api/admin/closures/:date', (req, res, ctx) => {
 }, A);
 
 const EDITABLE_SETTINGS = ['building_name', 'open_time', 'close_time', 'slot_minutes', 'max_hours_per_booking', 'max_advance_days', 'max_active_per_company', 'max_repeat_weeks', 'checkin_required', 'checkin_grace_minutes', 'show_titles_to_others', 'display_show_title', 'display_show_company',
-  'default_monthly_quota_hours', 'registration_enabled', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
+  'default_monthly_quota_hours', 'registration_enabled', 'registration_approval', 'gym_saturday', 'gym_weekly_hours', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
 route('GET', '/api/admin/settings', (req, res) => send(res, 200, { ...getSettings(), smtp_configured: mailer.isConfigured(), gym_template_custom: fs.existsSync(path.join(DATA_DIR, 'modulo-palestra.pdf')) }), A);
 route('PUT', '/api/admin/settings', (req, res, ctx) => {
   const b = ctx.body;
@@ -1089,6 +1205,7 @@ route('POST', '/api/register', (req, res, ctx) => {
   need(EMAIL_RE.test(email), 400, 'Indirizzo email non valido');
   need(ctx.body.privacy === true, 400, 'Per registrarti devi accettare il trattamento dei dati');
   const existing = db.prepare('SELECT * FROM users WHERE email=?').get(email);
+  need(!(existing && existing.email_verified && existing.approval === 'in_attesa'), 409, "Hai già confermato l'iscrizione: è in attesa di approvazione da parte dell'amministrazione. Riceverai un'email con la password appena sarà approvata.");
   need(!(existing && existing.email_verified), 409, 'Questa email è già registrata: accedi oppure usa "Password dimenticata".');
   // azienda: si aggancia a una esistente con lo stesso nome, altrimenti viene creata
   const key = normCompany(companyName);
@@ -1104,10 +1221,10 @@ route('POST', '/api/register', (req, res, ctx) => {
   const token = crypto.randomBytes(24).toString('hex');
   const expires = Date.now() + VERIFY_HOURS * 3600e3;
   if (existing) {
-    db.prepare('UPDATE users SET first_name=?,last_name=?,name=?,company_id=?,verify_token=?,verify_expires=? WHERE id=?').run(first, last, `${first} ${last}`, company.id, token, expires, existing.id);
+    db.prepare("UPDATE users SET first_name=?,last_name=?,name=?,company_id=?,verify_token=?,verify_expires=?,approval=? WHERE id=?").run(first, last, `${first} ${last}`, company.id, token, expires, s.registration_approval === '1' ? 'in_attesa' : 'approvato', existing.id);
   } else {
-    db.prepare(`INSERT INTO users(company_id,name,first_name,last_name,email,password_hash,role,must_change_password,active,email_verified,verify_token,verify_expires,self_registered)
-      VALUES (?,?,?,?,?,?,?,0,0,0,?,?,1)`).run(company.id, `${first} ${last}`, first, last, email, hashPassword(crypto.randomBytes(24).toString('hex')), hasMembers ? 'utente' : 'referente', token, expires);
+    db.prepare(`INSERT INTO users(company_id,name,first_name,last_name,email,password_hash,role,must_change_password,active,email_verified,verify_token,verify_expires,self_registered,approval)
+      VALUES (?,?,?,?,?,?,?,0,0,0,?,?,1,?)`).run(company.id, `${first} ${last}`, first, last, email, hashPassword(crypto.randomBytes(24).toString('hex')), hasMembers ? 'utente' : 'referente', token, expires, s.registration_approval === '1' ? 'in_attesa' : 'approvato');
   }
   sendMail(email, 'confirmRegistration', { name: first, company: company.name, link: `${BASE()}/conferma.html?token=${token}`, hours: VERIFY_HOURS });
   audit(null, 'registrazione', { email, company: company.name, nuova_azienda: newCompany });
@@ -1119,6 +1236,16 @@ route('POST', '/api/register/confirm', (req, res, ctx) => {
   const u = db.prepare('SELECT u.*, c.name company_name FROM users u LEFT JOIN companies c ON c.id=u.company_id WHERE verify_token=?').get(token);
   need(u, 404, 'Questo link non è valido o è già stato usato. Se hai già confermato, accedi con la password ricevuta via email.');
   need(u.verify_expires > Date.now(), 410, 'Il link è scaduto: registrati di nuovo con la stessa email per riceverne uno nuovo.');
+  if (u.approval === 'in_attesa') {
+    // email verificata: ora serve l'approvazione dell'amministrazione, la password arriva dopo
+    db.prepare('UPDATE users SET email_verified=1, verify_token=NULL, verify_expires=NULL, active=0 WHERE id=?').run(u.id);
+    sendMail(u.email, 'registrationPending', { name: u.first_name || u.name, company: u.company_name || '' });
+    const newCompany = !db.prepare("SELECT 1 FROM users WHERE company_id=? AND id<>? AND active=1").get(u.company_id, u.id);
+    for (const to of adminRecipients()) sendMail(to, 'adminApprovalNeeded', { name: u.name, email: u.email, company: u.company_name || '', newCompany });
+    audit(u.id, 'iscrizione_da_approvare', u.email);
+    broadcast();
+    return send(res, 200, { ok: true, pending: true, name: u.first_name || u.name, email: u.email, company: u.company_name });
+  }
   const pw = randomPassword();
   db.prepare('UPDATE users SET password_hash=?, active=1, email_verified=1, verify_token=NULL, verify_expires=NULL, must_change_password=0 WHERE id=?').run(hashPassword(pw), u.id);
   sendMail(u.email, 'welcome', { name: u.first_name || u.name, company: u.company_name || '', email: u.email, password: pw, quota: u.company_id ? effectiveQuota(u.company_id) : null });
@@ -1214,7 +1341,7 @@ setTimeout(sendReminders, 5000);
 // ---------------------------------------------------------------- amministrazione: funzioni aggiuntive
 route('GET', '/api/admin/live', (req, res) => {
   const s = getSettings(); const n = now();
-  send(res, 200, { now: n, rooms: roomsList().map((r) => roomState(r, s, n)), pending_waivers: db.prepare("SELECT COUNT(*) c FROM users WHERE gym_waiver_status='in_attesa'").get().c,
+  send(res, 200, { now: n, rooms: roomsList().map((r) => roomState(r, s, n)), pending_waivers: db.prepare("SELECT COUNT(*) c FROM users WHERE gym_waiver_status='in_attesa'").get().c, pending_registrations: db.prepare("SELECT COUNT(*) c FROM users WHERE approval='in_attesa' AND email_verified=1").get().c,
     open_penalties: db.prepare("SELECT COUNT(*) c FROM penalties WHERE status='da_addebitare'").get().c });
 }, A);
 route('GET', '/api/admin/waivers', (req, res) => {
