@@ -101,18 +101,11 @@ function renderGym(n) {
   if (!st.open) { cls = 'chiusa'; word = 'Chiusa'; sub = 'Oggi la palestra è chiusa'; }
   else if (cur.length >= 2) { cls = 'occupata'; word = 'Completa'; sub = `Fino alle ${cur[0].end}`; }
   else if (cur.length === 1) { cls = 'in_arrivo'; word = 'In uso'; sub = `${G[cur[0].gender] || ''} fino alle ${cur[0].end} · 1 posto libero`; }
-  else if (n.min < toMin(st.open_time) || n.min >= toMin(st.close_time)) { cls = 'fuori_orario'; word = 'Chiusa'; sub = `Prenotabile dalle ${st.open_time} alle ${st.close_time}`; }
+  else if (st.status === 'fuori_orario') { cls = 'fuori_orario'; word = 'Chiusa'; sub = `Aperta dalle ${(st.hours || {}).open || st.open_time} alle ${(st.hours || {}).close || st.close_time}`; }
+  else if (st.slots && st.slots.length && !st.slots.some((x) => toMin(x.start) <= n.min && n.min < toMin(x.end))) { const nx = st.slots.find((x) => toMin(x.start) > n.min); sub = nx ? `Prossima fascia ${nx.start}–${nx.end}` : sub; }
   const people = cur.length ? `<div class="meeting"><div class="m-label">In palestra adesso</div>${cur.map((c) => `<div class="m-title" style="font-size:3vh">${G[c.gender] || ''}${c.company ? ' · ' + esc(c.company) : ''} <span style="opacity:.7;font-weight:600">${c.start}–${c.end}</span></div>`).join('')}</div>` : '';
   const toCheck = (st.today || []).filter((b) => !b.checked_in && n.min >= toMin(b.start) - 10 && n.min < toMin(b.end));
   const actions = st.checkin_required && toCheck.length ? `<div class="actions">${toCheck.map((b) => `<button class="act primary" data-act="checkin" data-id="${b.id}">✓ Conferma presenza · ${G[b.gender] || ''} ${b.start}</button>`).join('')}</div>` : '';
-  const rows = [];
-  for (let t = Math.ceil(toMin(st.open_time) / 60) * 60; t + 60 <= toMin(st.close_time); t += 60) {
-    const at = (st.today || []).filter((b) => toMin(b.start) < t + 60 && toMin(b.end) > t);
-    if (t + 60 <= n.min && !at.length) continue;
-    const g = (x) => { const b = at.find((y) => y.gender === x); return b ? `<b>${G[x]}</b> ${esc(b.company || 'occupato')}` : `<span style="opacity:.6">${G[x]} libero</span>`; };
-    const cls = t + 60 <= n.min ? 'past' : t <= n.min ? 'now' : at.length ? '' : 'free';
-    rows.push(`<div class="ag ${cls}"><div class="t">${hh(t)}<small>${hh(t + 60)}</small></div><div class="w"><span style="font-size:1.8vh;opacity:1">${g('M')}</span><span style="font-size:1.8vh;opacity:1">${g('F')}</span></div></div>`);
-  }
   weekScreen({ cls, word, sub, meeting: people, actions: actions.replace(/^<div class="actions">|<\/div>$/g, '') });
   bindActions();
 }
@@ -132,7 +125,9 @@ function qrSvg(text) {
 function weekScreen({ cls, word, sub, meeting, actions }) {
   const n = clockNow(); const room = st.room; const gym = room.kind === 'palestra';
   const w = st.week || { days: [], bookings: [] };
-  const o = toMin(st.open_time); const c = toMin(st.close_time); const span = c - o;
+  const hrsO = gym && st.hours ? st.hours.open : st.open_time; const hrsC = gym && st.hours ? st.hours.close : st.close_time;
+  const o = Math.floor(toMin(hrsO) / 30) * 30; const c = Math.ceil(toMin(hrsC) / 30) * 30; const span = c - o;
+  const gslots = gym && st.slots && st.slots.length ? st.slots : null;
   const pos = (t) => ((toMin(t) - o) / span) * 100;
   const hours = []; for (let t = Math.ceil(o / 60) * 60; t <= c; t += 60) hours.push(t);
   const cols = w.days.map((d) => {
@@ -143,7 +138,7 @@ function weekScreen({ cls, word, sub, meeting, actions }) {
       const lane = gym ? (b.gender === 'F' ? 'lane-r' : 'lane-l') : '';
       const short = toMin(b.end) - toMin(b.start) <= 60 ? 'short' : '';
       return `<div class="wk-b ${lane} ${short} ${ended ? 'past' : ''} ${now ? 'now' : ''}" style="top:${pos(b.start)}%;height:${pos(b.end) - pos(b.start)}%">
-        ${gym ? `<b>${b.start.slice(0, 2)}–${b.end.slice(0, 2)}</b><span>${G2[b.gender] || ''}</span>` : `<b>${b.start}–${b.end}</b><span>${esc(b.company || b.title)}</span>`}${!gym && b.company && b.title && b.title !== 'Riservata' ? `<em>${esc(b.title)}</em>` : ''}</div>`;
+        ${gym ? `<span class="g1">${G2[b.gender] || ''}</span>` : `<b>${b.start}–${b.end}</b><span>${esc(b.company || b.title)}</span>`}${!gym && b.company && b.title && b.title !== 'Riservata' ? `<em>${esc(b.title)}</em>` : ''}</div>`;
     }).join('');
     const pastShade = past ? 100 : isToday ? Math.max(0, Math.min(100, ((n.min - o) / span) * 100)) : 0;
     const sel = pick && pick.date === d.date ? `<div class="wk-pick" style="top:${pos(pick.start)}%;height:${pos(pick.end) - pos(pick.start)}%"><b>${pick.start}</b></div>` : '';
@@ -151,6 +146,7 @@ function weekScreen({ cls, word, sub, meeting, actions }) {
       <div class="wk-day"><span>${GG[x.getUTCDay()]}</span><b>${x.getUTCDate()}</b>${gym && !d.closed ? '<div class="wk-lanes"><span>U</span><span>D</span></div>' : ''}</div>
       <div class="wk-body">${hours.map((t) => `<i class="wk-hl" style="top:${((t - o) / span) * 100}%"></i>`).join('')}
         ${pastShade ? `<div class="wk-past" style="height:${pastShade}%"></div>` : ''}
+        ${gslots && !d.closed ? gslots.map((x) => `<i class="wk-slot" style="top:${pos(x.start)}%;height:${pos(x.end) - pos(x.start)}%"></i>`).join('') : ''}
         ${blocks}${sel}
         ${isToday && n.min >= o && n.min <= c ? `<div class="wk-now" style="top:${((n.min - o) / span) * 100}%"></div>` : ''}</div></div>`;
   }).join('');
@@ -159,7 +155,7 @@ function weekScreen({ cls, word, sub, meeting, actions }) {
   root.innerHTML = `<div class="wk">
     <section class="wk-main">
       <header class="wk-head"><img class="logo" src="brand/logo-bianco.png" alt="CARDO Centro Uffici">
-        <div class="wk-title"><h1>${gym ? '🏋️ ' : ''}${esc(room.name)}</h1><span>${gym ? 'Massimo 1 uomo + 1 donna per ora' : `👥 ${room.capacity} posti`}${room.location ? ' · ' + esc(room.location) : ''} · Settimana ${range}</span></div></header>
+        <div class="wk-title"><h1>${gym ? '🏋️ ' : ''}${esc(room.name)}</h1><span>${gym ? `Massimo 1 uomo + 1 donna per fascia${gslots ? ` · fasce da ${toMin(gslots[0].end) - toMin(gslots[0].start)} min dalle ${gslots[0].start} alle ${gslots.at(-1).end}` : ''}` : `👥 ${room.capacity} posti`}${room.location ? ' · ' + esc(room.location) : ''} · Settimana ${range}</span></div></header>
       <div class="wk-grid" style="--n:${w.days.length};grid-template-columns:7vh repeat(${w.days.length}, 1fr)">
         <div class="wk-axis"><div class="wk-day"></div><div class="wk-body">${hours.map((t) => `<span style="top:${((t - o) / span) * 100}%">${hhmm(t)}</span>`).join('')}</div></div>
         ${cols}
@@ -178,11 +174,16 @@ function weekScreen({ cls, word, sub, meeting, actions }) {
   // tocco su uno spazio libero: QR con giorno e ora già impostati
   document.querySelectorAll('.wk-col:not(.closed) .wk-body').forEach((el) => (el.onclick = (e) => {
     const date = el.parentElement.dataset.date; const r = el.getBoundingClientRect();
-    const step = gym ? 60 : 30;
-    let m = o + Math.floor((((e.clientY - r.top) / r.height) * span) / step) * step;
-    m = Math.max(o, Math.min(c - step, m));
+    const yMin = o + ((e.clientY - r.top) / r.height) * span;
+    let m; let start; let end; let step = 30;
+    if (gslots) {
+      const gs = gslots.find((x) => toMin(x.start) <= yMin && yMin < toMin(x.end)); if (!gs) return;
+      m = toMin(gs.start); start = gs.start; end = gs.end; step = toMin(gs.end) - m;
+    } else {
+      m = o + Math.floor((yMin - o) / step) * step; m = Math.max(o, Math.min(c - step, m));
+      start = hhmm(m); end = hhmm(m + (60 <= c - m ? 60 : 30));
+    }
     if (date < n.date || (date === n.date && m + step <= n.min)) return;
-    const start = hhmm(m); const end = hhmm(m + (gym ? 60 : 60 <= c - m ? 60 : 30));
     const list = w.bookings.filter((b) => b.date === date && toMin(b.start) < m + step && toMin(b.end) > m);
     if (gym ? list.length >= 2 : list.length) return;
     pick = { date, start, end }; render();

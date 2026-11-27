@@ -445,7 +445,8 @@ async function impostazioni() {
         ${chk('door_counts_as_checkin', 'Aprire la porta conferma la presenza', 'Chi apre la porta non deve fare il check-in sul tablet e non rischia la penale per mancato utilizzo.')}
         <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
         ${chk('gym_rotation', 'Rotazione degli orari in palestra', 'Una persona non può prenotare lo stesso giorno alla stessa ora in due settimane consecutive, così tutti possono usare ogni fascia.')}
-        <label class="field"><span>Ore di palestra a settimana per persona</span><input type="number" min="0" step="1" name="gym_weekly_hours" value="${esc(s.gym_weekly_hours)}"><small>0 = nessun limite. La settimana va dal lunedì alla domenica.</small></label>
+        <label class="field"><span>Fasce orarie della palestra</span><textarea name="gym_slots" rows="4" style="font-family:ui-monospace,monospace;font-size:13px">${esc((s.gym_slots || '').split(',').join(', '))}</textarea><small>Una fascia per voce, separate da virgola, nel formato 06:30-07:15. Valgono per tutti i giorni di apertura della palestra.</small></label>
+        <label class="field"><span>Ingressi in palestra a settimana per persona</span><input type="number" min="0" step="1" name="gym_weekly_hours" value="${esc(s.gym_weekly_hours)}"><small>Numero massimo di fasce prenotabili da lunedì a domenica. 0 = nessun limite.</small></label>
         <label class="field"><span>Regola di accesso alla palestra</span><select name="gym_rule">${[['uno_per_sesso', 'Massimo 1 uomo + 1 donna per ora'], ['stesso_sesso', 'Massimo 2 persone dello stesso sesso per ora'], ['misto', 'Fino alla capienza, senza distinzione']].map(([v, l]) => `<option value="${v}" ${s.gym_rule === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div></div>
       <div class="card"><div class="card-head"><h3>Check-in al display</h3></div><div class="card-pad">

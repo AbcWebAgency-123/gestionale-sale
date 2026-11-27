@@ -164,13 +164,14 @@ const DEFAULT_SETTINGS = {
   gym_waiver_email: 'info@ufficicardo.com',
   registration_approval: '1',        // ogni iscrizione va approvata dall'amministrazione
   gym_saturday: '1',                 // la palestra è prenotabile anche il sabato
-  gym_weekly_hours: '3',
+  gym_weekly_hours: '3',             // ingressi (fasce) di palestra a settimana per persona (0 = illimitati)
+  gym_slots: '06:30-07:15,07:30-08:15,08:30-09:15,09:30-10:15,10:30-11:15,11:30-12:15,12:30-13:15,13:30-14:15,14:30-15:15,15:30-16:15,16:30-17:15,17:30-18:15,18:30-19:15,19:30-20:15',
   current_month_only: '1',           // le aziende prenotano solo nel mese in corso…
   next_month_open_day: '20',         // …e dal giorno 20 anche nel mese successivo
-  gym_rotation: '1',
+  gym_rotation: '1',                 // palestra: niente stesso giorno e ora in due settimane consecutive
   door_open_minutes_before: '5',     // la porta si apre da N minuti prima dell'inizio fino alla fine
   door_pulse_seconds: '3',           // dopo N secondi il relè torna a riposo (0 = lo gestisce la Shelly)
-  door_counts_as_checkin: '1',       // aprire la porta conferma la presenza                 // palestra: niente stesso giorno e ora in due settimane consecutive             // ore di palestra a settimana per persona (vuoto/0 = illimitate)
+  door_counts_as_checkin: '1',       // aprire la porta conferma la presenza
   checkin_enabled_at: '',
   lobby_token: crypto.randomBytes(16).toString('hex'),
 };
@@ -452,6 +453,16 @@ function autoRelease() {
 }
 setInterval(autoRelease, 30 * 1000);
 
+// Fasce orarie della palestra (es. "06:30-07:15,07:30-08:15")
+function gymSlots(s = getSettings()) {
+  return String(s.gym_slots || '').split(/[,;\n]+/).map((x) => x.trim().match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/)).filter(Boolean)
+    .map((m) => ({ start: `${m[1].padStart(2, '0')}:${m[2]}`, end: `${m[3].padStart(2, '0')}:${m[4]}` }))
+    .filter((x) => toMin(x.end) > toMin(x.start)).sort((a, b) => toMin(a.start) - toMin(b.start));
+}
+function gymHours(s = getSettings()) {
+  const sl = gymSlots(s);
+  return sl.length ? { open: sl[0].start, close: sl[sl.length - 1].end } : { open: s.open_time, close: s.close_time };
+}
 // Giorni di apertura: sale dal lunedì al venerdì; la palestra anche il sabato (se attivo)
 function dayOpenFor(room, date, s = S()) {
   const wd = weekday(date);
@@ -479,9 +490,13 @@ function bookingWindowIssues({ date, start, end }, s, { isAdmin = false, ignoreP
   if (closure) return `Lo stabile è chiuso in questa data${closure.reason ? ' (' + closure.reason + ')' : ''}`;
   const a = toMin(start), b = toMin(end), open = toMin(s.open_time), close = toMin(s.close_time);
   if (b <= a) return "L'orario di fine deve essere successivo all'inizio";
-  if (a < open || b > close) return `Le sale sono prenotabili dalle ${s.open_time} alle ${s.close_time}`;
-  if ((a - open) % s.slot || (b - open) % s.slot) return `Gli orari devono essere a intervalli di ${s.slot} minuti`;
-  if (!isAdmin && s.maxHours && (b - a) > s.maxHours * 60) return `Durata massima per prenotazione: ${s.maxHours} ore`;
+  if (room && room.kind === 'palestra' && gymSlots(s).length) {
+    if (!gymSlots(s).some((x) => x.start === start && x.end === end)) return `In palestra si prenota una fascia alla volta: ${gymSlots(s).slice(0, 3).map((x) => `${x.start}–${x.end}`).join(', ')}…`;
+  } else {
+    if (a < open || b > close) return `Le sale sono prenotabili dalle ${s.open_time} alle ${s.close_time}`;
+    if ((a - open) % s.slot || (b - open) % s.slot) return `Gli orari devono essere a intervalli di ${s.slot} minuti`;
+    if (!isAdmin && s.maxHours && (b - a) > s.maxHours * 60) return `Durata massima per prenotazione: ${s.maxHours} ore`;
+  }
   const n = now();
   if (!ignorePast) {
     if (date < n.date || (date === n.date && b <= n.min)) return 'Non è possibile prenotare nel passato';
@@ -538,14 +553,14 @@ function quotaInfo(companyId) {
 }
 function gymIssue(room, date, start, end, gender, userId, excludeId = 0) {
   const a = toMin(start); const b = toMin(end);
-  if (b - a !== 60 || a % 60) return "In palestra si prenota un'ora alla volta, partendo dall'ora esatta (es. 10:00–11:00)";
+  if (!gymSlots().length && (b - a !== 60 || a % 60)) return "In palestra si prenota un'ora alla volta, partendo dall'ora esatta (es. 10:00–11:00)";
   const rows = db.prepare(`SELECT id,user_id,gender FROM bookings WHERE room_id=? AND date=? AND status='confermata' AND id<>? AND start < ? AND end > ?`).all(room.id, date, excludeId, end, start);
-  if (rows.some((r) => r.user_id === userId)) return 'Hai già una prenotazione in palestra in questa ora';
+  if (rows.some((r) => r.user_id === userId)) return 'Hai già una prenotazione in palestra in questa fascia';
   const rule = getSettings().gym_rule;
   const max = rule === 'uno_per_sesso' ? 2 : Math.max(1, room.capacity || 2);
-  if (rows.length >= max) return `Palestra al completo in questa ora (massimo ${max} persone)`;
-  if (rule === 'uno_per_sesso' && rows.some((r) => r.gender === gender)) return gender === 'F' ? "Il posto donna di quest'ora è già occupato" : "Il posto uomo di quest'ora è già occupato";
-  if (rule === 'stesso_sesso' && rows.some((r) => r.gender && r.gender !== gender)) return `In quest'ora la palestra è già prenotata da ${gender === 'F' ? 'uomini' : 'donne'}`;
+  if (rows.length >= max) return `Palestra al completo in questa fascia (massimo ${max} persone)`;
+  if (rule === 'uno_per_sesso' && rows.some((r) => r.gender === gender)) return gender === 'F' ? 'Il posto donna di questa fascia è già occupato' : 'Il posto uomo di questa fascia è già occupato';
+  if (rule === 'stesso_sesso' && rows.some((r) => r.gender && r.gender !== gender)) return `In questa fascia la palestra è già prenotata da ${gender === 'F' ? 'uomini' : 'donne'}`;
   return null;
 }
 // Limite settimanale di palestra per persona (settimana dal lunedì alla domenica)
@@ -554,15 +569,13 @@ function gymHoursInWeek(userId, date, excludeId = 0) {
   const mon = mondayOf(date);
   const rows = db.prepare(`SELECT b.start,b.end FROM bookings b JOIN rooms r ON r.id=b.room_id
     WHERE b.user_id=? AND r.kind='palestra' AND b.status IN ('confermata','liberata') AND b.date BETWEEN ? AND ? AND b.id<>?`).all(userId, mon, addDays(mon, 6), excludeId);
-  return rows.reduce((t, r) => t + (toMin(r.end) - toMin(r.start)) / 60, 0);
+  return rows.length; // ingressi (fasce) prenotati nella settimana
 }
 function gymWeeklyIssue(userId, date, start, end, s) {
   if (!s.gymWeekly) return null;
   const used = gymHoursInWeek(userId, date);
-  const add = (toMin(end) - toMin(start)) / 60;
-  const lim = fmtH(s.gymWeekly);
-  if (used >= s.gymWeekly - 1e-9) return `Hai già prenotato ${lim} ${s.gymWeekly === 1 ? 'ora' : 'ore'} di palestra nella settimana del ${mondayOf(date).slice(8)}/${mondayOf(date).slice(5, 7)}: il massimo è ${lim} ore a settimana per persona`;
-  if (used + add > s.gymWeekly + 1e-9) return `Puoi prenotare la palestra al massimo ${lim} ore a settimana`;
+  const lim = s.gymWeekly;
+  if (used >= lim) return `Hai già ${used} ${used === 1 ? 'ingresso' : 'ingressi'} in palestra nella settimana del ${mondayOf(date).slice(8)}/${mondayOf(date).slice(5, 7)}: il massimo è ${lim} a settimana per persona`;
   return null;
 }
 // Rotazione palestra: non lo stesso giorno della settimana alla stessa ora nella settimana prima o dopo
@@ -674,11 +687,13 @@ function roomState(room, s, n) {
   if (!open) status = 'chiusa';
   else if (current) status = 'occupata';
   else if (next && toMin(next.start) - n.min <= 15) status = 'in_arrivo';
-  else if (n.min < toMin(s.open_time) || n.min >= toMin(s.close_time)) status = 'fuori_orario';
-  const freeUntil = !current ? (next ? next.start : s.close_time) : null;
+  const hrs = room.kind === 'palestra' ? gymHours(s) : { open: s.open_time, close: s.close_time };
+  if (status === 'libera' && (n.min < toMin(hrs.open) || n.min >= toMin(hrs.close))) status = 'fuori_orario';
+  const freeUntil = !current ? (next ? next.start : hrs.close) : null;
   return {
     room: { id: room.id, name: room.name, kind: room.kind || 'sala', capacity: room.capacity, location: room.location, equipment: room.equipment, color: room.color },
     status, open, current, current_all: currentAll, next, free_until: freeUntil, today: items,
+    hours: hrs, slots: room.kind === 'palestra' ? gymSlots(s) : null,
   };
 }
 
@@ -740,7 +755,8 @@ route('GET', '/api/config', (req, res, ctx) => {
     gym_rotation: s.gym_rotation === '1',
     doors: { on: shelly.configured(), before: parseInt(s.door_open_minutes_before, 10) || 0 },
     gym_weekly_hours: parseFloat(String(s.gym_weekly_hours || '').replace(',', '.')) || 0,
-    gym_week: { this: +gymHoursInWeek(ctx.user.id, n.date).toFixed(2), monday: mondayOf(n.date) },
+    gym_week: { this: gymHoursInWeek(ctx.user.id, n.date), monday: mondayOf(n.date) },
+    gym_slots: gymSlots(s),
     rooms: roomsList(),
     closures: db.prepare('SELECT date,reason FROM closures WHERE date>=? ORDER BY date').all(addDays(n.date, -31)),
     now: n,
@@ -792,7 +808,7 @@ route('GET', '/api/gym/week', (req, res, ctx) => {
   const gym = db.prepare("SELECT id FROM rooms WHERE kind='palestra' AND active=1 ORDER BY id LIMIT 1").get();
   const blocked = s.gym_rotation === '1' && gym && ctx.user.role !== 'admin'
     ? db.prepare(`SELECT DISTINCT start FROM bookings WHERE user_id=? AND room_id=? AND status IN ('confermata','liberata') AND date IN (?,?)`).all(ctx.user.id, gym.id, addDays(d, -7), addDays(d, 7)).map((r) => r.start) : [];
-  send(res, 200, { monday: mondayOf(d), used: +gymHoursInWeek(ctx.user.id, d).toFixed(2), limit: s.gymWeekly || null, rotation_blocked: blocked });
+  send(res, 200, { monday: mondayOf(d), used: gymHoursInWeek(ctx.user.id, d), limit: s.gymWeekly || null, rotation_blocked: blocked });
 });
 route('GET', '/api/bookings/mine', (req, res, ctx) => {
   const s = getSettings(); const n = now();
@@ -1220,7 +1236,7 @@ route('DELETE', '/api/admin/closures/:date', (req, res, ctx) => {
 }, A);
 
 const EDITABLE_SETTINGS = ['building_name', 'open_time', 'close_time', 'slot_minutes', 'max_hours_per_booking', 'max_advance_days', 'max_active_per_company', 'max_repeat_weeks', 'checkin_required', 'checkin_grace_minutes', 'show_titles_to_others', 'display_show_title', 'display_show_company',
-  'default_monthly_quota_hours', 'registration_enabled', 'registration_approval', 'gym_saturday', 'gym_weekly_hours', 'current_month_only', 'next_month_open_day', 'gym_rotation', 'door_open_minutes_before', 'door_pulse_seconds', 'door_counts_as_checkin', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
+  'default_monthly_quota_hours', 'registration_enabled', 'registration_approval', 'gym_saturday', 'gym_weekly_hours', 'gym_slots', 'current_month_only', 'next_month_open_day', 'gym_rotation', 'door_open_minutes_before', 'door_pulse_seconds', 'door_counts_as_checkin', 'admin_notify_email', 'reminders_enabled', 'penalties_enabled', 'penalty_amount', 'cancel_notice_hours', 'gym_rule', 'gym_waiver_email'];
 route('GET', '/api/admin/settings', (req, res) => send(res, 200, { ...getSettings(), smtp_configured: mailer.isConfigured(), gym_template_custom: fs.existsSync(path.join(DATA_DIR, 'modulo-palestra.pdf')) }), A);
 route('PUT', '/api/admin/settings', (req, res, ctx) => {
   const b = ctx.body;
@@ -1229,6 +1245,12 @@ route('PUT', '/api/admin/settings', (req, res, ctx) => {
     need(isTime(o) && isTime(c) && toMin(c) > toMin(o), 400, 'Orari di apertura non validi');
   }
   if (b.slot_minutes !== undefined) need(['15', '30', '60'].includes(String(b.slot_minutes)), 400, 'Durata slot ammessa: 15, 30 o 60 minuti');
+  if (b.gym_slots !== undefined) {
+    const parsed = gymSlots({ gym_slots: b.gym_slots });
+    need(parsed.length || !String(b.gym_slots).trim(), 400, 'Fasce della palestra non valide: usa il formato 06:30-07:15, separate da virgola');
+    for (let i = 1; i < parsed.length; i++) need(toMin(parsed[i].start) >= toMin(parsed[i - 1].end), 400, `Le fasce ${parsed[i - 1].start}–${parsed[i - 1].end} e ${parsed[i].start}–${parsed[i].end} si sovrappongono`);
+    b.gym_slots = parsed.map((x) => `${x.start}-${x.end}`).join(',');
+  }
   if (b.gym_rule !== undefined) need(['uno_per_sesso', 'stesso_sesso', 'misto'].includes(b.gym_rule), 400, 'Regola palestra non valida');
   for (const k of ['gym_waiver_email', 'admin_notify_email']) if (b[k]) need(EMAIL_RE.test(String(b[k]).trim()), 400, 'Indirizzo email non valido');
   if (b.checkin_required === '1' && getSettings().checkin_required !== '1') db.prepare("UPDATE settings SET value=CURRENT_TIMESTAMP WHERE key='checkin_enabled_at'").run();

@@ -539,3 +539,5 @@ body.center-page { min-height: 100vh; display: flex; flex-direction: column; bac
 .door-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
 .field-group { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 4px; margin: 6px 0 12px; background: var(--surface-2, #faf8f4); }
 @media (max-width: 640px) { .door-banner { flex-wrap: wrap; } .door-banner .btn { width: 100%; } }
+.slot.off { background: repeating-linear-gradient(-45deg, #f3f1ec, #f3f1ec 5px, #ebe8e1 5px, #ebe8e1 10px); cursor: default; }
+.slot.off:hover::after { display: none; }

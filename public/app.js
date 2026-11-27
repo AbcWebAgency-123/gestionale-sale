@@ -89,9 +89,14 @@ function firstBookableDay() {
   for (let i = 0; i < 30 && isClosed(d); i++) d = addDays(d, 1);
   return d;
 }
-const slotsCount = () => (toMin(state.cfg.close_time) - toMin(state.cfg.open_time)) / state.cfg.slot_minutes;
-const slotTime = (i) => toHHMM(toMin(state.cfg.open_time) + i * state.cfg.slot_minutes);
-const slotIndex = (t) => (toMin(t) - toMin(state.cfg.open_time)) / state.cfg.slot_minutes;
+// la griglia del giorno si allarga per comprendere le fasce della palestra (es. 06:30–20:15)
+const gymSlotList = () => state.cfg.gym_slots || [];
+const gridOpen = () => state.gridOpen ?? toMin(state.cfg.open_time);
+const gridClose = () => state.gridClose ?? toMin(state.cfg.close_time);
+const slotsCount = () => (gridClose() - gridOpen()) / state.cfg.slot_minutes;
+const slotTime = (i) => toHHMM(gridOpen() + i * state.cfg.slot_minutes);
+const slotIndex = (t) => (toMin(t) - gridOpen()) / state.cfg.slot_minutes;
+const gymSlotAt = (t) => gymSlotList().find((x) => toMin(x.start) <= toMin(t) && toMin(t) < toMin(x.end));
 const isGym = (r) => r && r.kind === 'palestra';
 const isReception = (r) => r && r.kind === 'reception';
 const meetingRooms = () => state.cfg.rooms.filter((r) => !isGym(r) && (!isReception(r) || state.me.role === 'admin'));
@@ -262,7 +267,8 @@ function renderMonth() {
     if (closed) body = `<div class="mc-closed">${esc(closureReason(d) || (weekday(d) === 0 ? '' : weekday(d) === 6 ? 'Chiuso' : 'Chiuso'))}</div>`;
     else body = rooms.map((r) => {
       const mins = list.filter((b) => b.room_id === r.id).reduce((t, b) => t + toMin(b.end) - toMin(b.start), 0);
-      const cap = isGym(r) ? open * 2 : open;
+      const gymMin = gymSlotList().reduce((t, x) => t + toMin(x.end) - toMin(x.start), 0) || open;
+      const cap = isGym(r) ? gymMin * 2 : open;
       const pct = Math.min(100, Math.round((100 * mins) / cap));
       return `<div class="mc-room" title="${esc(r.name)}: ${pct}% occupata"><i style="background:${r.color}"></i><span>${esc(r.name)}</span><em><b style="width:${pct}%;background:${r.color}"></b></em></div>`;
     }).join('');
@@ -285,7 +291,7 @@ async function loadDay() {
 
 function renderGrid() {
   const cfg = state.cfg; const d = state.date; const n = nowLocal();
-  $('#cal-title').innerHTML = `${fmtDateLong(d).replace(/ \d{4}$/, '')}<small>${d === n.date ? 'Oggi · ' : ''}${cfg.open_time} – ${cfg.close_time} · ${state.bookings.filter((b) => b.date === d).length} prenotazioni</small>`;
+  $('#cal-title').innerHTML = `${fmtDateLong(d).replace(/ \d{4}$/, '')}<small>${d === n.date ? 'Oggi · ' : ''}${isSaturday(d) ? 'Palestra' : `Sale ${cfg.open_time} – ${cfg.close_time}`} · ${state.bookings.filter((b) => b.date === d).length} prenotazioni</small>`;
   $('#pick-date').value = d;
   $('#quota-box').innerHTML = quotaPill();
   $('#month-banner').innerHTML = monthLockBanner(d.slice(0, 7));
@@ -304,7 +310,14 @@ function renderGrid() {
     return;
   }
   // il sabato è aperta solo la palestra
-  const rooms = isSaturday(d) ? cfg.rooms.filter(isGym) : cfg.rooms; const N = slotsCount(); const cols = `64px repeat(${rooms.length}, minmax(150px, 1fr))`;
+  const rooms = isSaturday(d) ? cfg.rooms.filter(isGym) : cfg.rooms;
+  { const sm = cfg.slot_minutes; const gs = rooms.some(isGym) ? gymSlotList() : [];
+    let o = isSaturday(d) && gs.length ? Infinity : toMin(cfg.open_time); let c = isSaturday(d) && gs.length ? -Infinity : toMin(cfg.close_time);
+    if (gs.length) { o = Math.min(o, toMin(gs[0].start)); c = Math.max(c, toMin(gs[gs.length - 1].end)); }
+    state.gridOpen = Math.floor(o / sm) * sm; state.gridClose = Math.ceil(c / sm) * sm; }
+  const offFor = (r, t) => { const m = toMin(t); if (isGym(r) && gymSlotList().length) return !gymSlotAt(t); return m < toMin(cfg.open_time) || m >= toMin(cfg.close_time); };
+  const hoursFor = (r) => isGym(r) && gymSlotList().length ? [toMin(gymSlotList()[0].start), toMin(gymSlotList().at(-1).end)] : [toMin(cfg.open_time), toMin(cfg.close_time)];
+  const N = slotsCount(); const cols = `64px repeat(${rooms.length}, minmax(150px, 1fr))`;
   const dayBookings = state.bookings.filter((b) => b.date === d);
   const isToday = d === n.date;
   const isPastSlot = (i) => !inBookableMonth(d) || d < n.date || (isToday && toMin(slotTime(i)) + cfg.slot_minutes <= n.min);
@@ -312,14 +325,14 @@ function renderGrid() {
   let head = `<div class="cal-head" style="grid-template-columns:${cols}"><div></div>`;
   for (const r of rooms) {
     let badge = '';
-    if (isToday && n.min >= toMin(cfg.open_time) && n.min < toMin(cfg.close_time)) {
+    if (isToday && n.min >= hoursFor(r)[0] && n.min < hoursFor(r)[1]) {
       const busyAll = dayBookings.filter((b) => b.room_id === r.id && toMin(b.start) <= n.min && n.min < toMin(b.end));
       const busy = busyAll[0];
       if (isGym(r)) badge = busyAll.length >= 2 ? '<span class="status-badge st-occupata">Completa adesso</span>' : busyAll.length ? '<span class="status-badge st-neutral">1 posto libero adesso</span>' : '<span class="status-badge st-libera">Libera ora</span>';
       else badge = busy ? `<span class="status-badge st-occupata">Occupata fino alle ${busy.end}</span>` : '<span class="status-badge st-libera">Libera ora</span>';
       if (isReception(r) && !busy) badge = '';
     }
-    const gymRule = { uno_per_sesso: '1 uomo + 1 donna per ora', stesso_sesso: 'max 2 persone dello stesso sesso', misto: `max ${r.capacity} persone per ora` }[cfg.gym_rule] || '';
+    const gymRule = { uno_per_sesso: '1 uomo + 1 donna per fascia', stesso_sesso: 'max 2 persone dello stesso sesso', misto: `max ${r.capacity} persone per ora` }[cfg.gym_rule] || '';
     head += `<div class="room-head" title="${esc(r.equipment)}">
       <div class="rh-top"><span class="swatch" style="background:${r.color}"></span><b>${isGym(r) ? '🏋️ ' : ''}${esc(r.name)}</b></div>
       <div class="meta">${isGym(r) ? `<span>${gymRule}</span>` : `<span>${ICON.people} ${r.capacity}${isReception(r) ? '+' : ''} posti</span>${r.location ? `<span>${ICON.pin} ${esc(r.location)}</span>` : ''}`}</div>${isReception(r) ? '<span class="status-badge st-neutral">🛎️ Prenotazione alla reception</span>' : badge}
@@ -332,7 +345,7 @@ function renderGrid() {
     const t = slotTime(i); const isHour = t.endsWith(':00');
     body += `<div class="time-col ${i === 0 ? 'first' : ''}" style="grid-row:${i + 1};grid-column:1">${isHour || i === 0 ? t : ''}</div>`;
     rooms.forEach((r, ri) => {
-      body += `<div class="slot ${isHour ? 'hour' : ''} ${isPastSlot(i) ? 'past' : ''} ${isReception(r) && state.me.role !== 'admin' ? 'reception' : ''}" style="grid-row:${i + 1};grid-column:${ri + 2}" data-room="${r.id}" data-i="${i}" data-t="${t}"></div>`;
+      body += `<div class="slot ${isHour ? 'hour' : ''} ${isPastSlot(i) ? 'past' : ''} ${offFor(r, t) ? 'off' : ''} ${isReception(r) && state.me.role !== 'admin' ? 'reception' : ''}" style="grid-row:${i + 1};grid-column:${ri + 2}" data-room="${r.id}" data-i="${i}" data-t="${t}"></div>`;
     });
   }
   for (const b of dayBookings) {
@@ -353,8 +366,8 @@ function renderGrid() {
       <span class="b-time">${b.start}–${b.end}</span><span class="b-title">${esc(b.title)}</span>
       <span class="b-sub">${esc(b.company_name)}${own && b.user_name ? ' · ' + esc(b.user_name) : ''}</span></div>`;
   }
-  if (isToday && n.min >= toMin(cfg.open_time) && n.min <= toMin(cfg.close_time)) {
-    const top = ((n.min - toMin(cfg.open_time)) / cfg.slot_minutes) * parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--slot-h'));
+  if (isToday && n.min >= gridOpen() && n.min <= gridClose()) {
+    const top = ((n.min - gridOpen()) / cfg.slot_minutes) * parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--slot-h'));
     body += `<div class="now-line" data-t="${n.time}" style="top:${top}px;left:64px"></div>`;
   }
   body += '</div>';
@@ -370,7 +383,7 @@ function renderGrid() {
     $$(`.slot[data-room="${sel.room}"]`, grid).forEach((x) => { const i = +x.dataset.i; if (i >= a && i <= b) x.classList.add('sel'); });
   };
   grid.addEventListener('pointerdown', (e) => {
-    const s = e.target.closest('.slot'); if (!s || s.classList.contains('past') || e.button !== 0) return;
+    const s = e.target.closest('.slot'); if (!s || s.classList.contains('past') || s.classList.contains('off') || e.button !== 0) return;
     if (s.classList.contains('reception')) return receptionInfo(cfg.rooms.find((x) => x.id === +s.dataset.room));
     sel = { room: +s.dataset.room, a: +s.dataset.i, b: +s.dataset.i }; paint();
     grid.setPointerCapture?.(e.pointerId);
@@ -378,7 +391,7 @@ function renderGrid() {
   grid.addEventListener('pointermove', (e) => {
     if (!sel) return;
     const s = document.elementFromPoint(e.clientX, e.clientY)?.closest('.slot');
-    if (s && +s.dataset.room === sel.room && !s.classList.contains('past')) { sel.b = +s.dataset.i; paint(); }
+    if (s && +s.dataset.room === sel.room && !s.classList.contains('past') && !s.classList.contains('off')) { sel.b = +s.dataset.i; paint(); }
   });
   const finish = () => {
     if (!sel) return;
@@ -392,7 +405,7 @@ function renderGrid() {
       while (end < want && !dayBookings.some((x) => x.room_id === room && Math.floor(slotIndex(x.start)) <= end && Math.ceil(slotIndex(x.end)) > end)) end++;
     }
     const roomObj = cfg.rooms.find((x) => x.id === room);
-    if (isGym(roomObj)) { paint(); return gymFlow({ date: state.date, start: toHHMM(Math.floor(toMin(slotTime(a)) / 60) * 60) }); }
+    if (isGym(roomObj)) { paint(); const gsl = gymSlotAt(slotTime(a)); return gymFlow({ date: state.date, start: gsl ? gsl.start : toHHMM(Math.floor(toMin(slotTime(a)) / 60) * 60) }); }
     bookingModal({ date: state.date, room_id: room, start: slotTime(a), end: slotTime(end) }, paint);
   };
   grid.addEventListener('pointerup', finish);
@@ -423,6 +436,11 @@ function infoModal(b) {
 /* ---------------------------------------------------------------- modale prenotazione */
 async function bookingModal(b, onClose) {
   const cfg = state.cfg; const editing = !!b.id; const isAdmin = state.me.role === 'admin';
+  // le sale riunioni usano sempre l'orario delle sale (non quello allargato della palestra)
+  const mOpen = toMin(cfg.open_time); const sm = cfg.slot_minutes;
+  const slotsCount = () => (toMin(cfg.close_time) - mOpen) / sm;
+  const slotTime = (i) => toHHMM(mOpen + i * sm);
+  const slotIndex = (t) => (toMin(t) - mOpen) / sm;
   const N = slotsCount();
   const f = { title: b.title || '', date: b.date || state.date, start: b.start || '', end: b.end || '', room_id: b.room_id || null, attendees: b.attendees || '', notes: b.notes || '', repeat_weeks: 0, company_id: b.company_id || '' };
   if (!f.start) {
@@ -599,7 +617,7 @@ async function renderMine() {
         <div class="card card-pad side-card"><h3>Regole di utilizzo</h3><ul class="rules">
           <li>Sale prenotabili dal <b>lunedì al venerdì</b>, dalle <b>${state.cfg.open_time}</b> alle <b>${state.cfg.close_time}</b>.</li>
           ${state.cfg.rooms.filter(isReception).map((r) => `<li><b>${esc(r.name)}</b> (${r.capacity}+ posti) si prenota direttamente <b>alla reception</b>.</li>`).join('')}
-          ${state.cfg.rooms.some(isGym) ? `<li>Palestra: un'ora alla volta${satOpen() ? ', <b>dal lunedì al sabato</b>' : ''}${state.cfg.gym_weekly_hours ? `, massimo <b>${state.cfg.gym_weekly_hours} ore a settimana</b> per persona` : ''}. Non scala dal monte ore.</li>` : ''}
+          ${state.cfg.rooms.some(isGym) ? `<li>Palestra: una fascia alla volta${gymSlotList().length ? ` (dalle <b>${gymSlotList()[0].start}</b> alle <b>${gymSlotList().at(-1).end}</b>, fasce da ${toMin(gymSlotList()[0].end) - toMin(gymSlotList()[0].start)} minuti)` : ''}${satOpen() ? ', <b>dal lunedì al sabato</b>' : ''}${state.cfg.gym_weekly_hours ? `, massimo <b>${state.cfg.gym_weekly_hours} ingressi a settimana</b> per persona` : ''}. Non scala dal monte ore.</li>` : ''}
           ${state.cfg.rooms.some(isGym) && state.cfg.gym_rotation ? '<li>Palestra a <b>rotazione</b>: non puoi prenotare lo stesso giorno alla stessa ora in due settimane consecutive.</li>' : ''}
           <li>Blocchi da ${state.cfg.slot_minutes} minuti, massimo ${String(state.cfg.max_hours_per_booking).replace('.', ',')} ore per prenotazione.</li>
           ${state.cfg.current_month_only ? `<li>Si prenota nel <b>mese in corso</b>${state.cfg.next_month_open_day ? `; dal giorno <b>${state.cfg.next_month_open_day}</b> si apre anche il mese successivo` : ''}.</li>` : `<li>Prenotazione fino a ${state.cfg.max_advance_days} giorni in anticipo.</li>`}
@@ -680,18 +698,19 @@ function waiverModal() {
 }
 async function gymModal({ date, start }) {
   const cfg = state.cfg; const gym = cfg.rooms.find(isGym);
-  const hours = []; for (let t = Math.ceil(toMin(cfg.open_time) / 60) * 60; t + 60 <= toMin(cfg.close_time); t += 60) hours.push(toHHMM(t));
+  const slots = gymSlotList().length ? gymSlotList() : (() => { const a = []; for (let t = Math.ceil(toMin(cfg.open_time) / 60) * 60; t + 60 <= toMin(cfg.close_time); t += 60) a.push({ start: toHHMM(t), end: toHHMM(t + 60) }); return a; })();
+  const hours = slots.map((x) => x.start); const endOf = (t) => (slots.find((x) => x.start === t) || { end: toHHMM(toMin(t) + 60) }).end;
   const n = nowLocal();
   let gender = state.me.gender || 'M';
   const f = { date: date && !isClosed(date) && inBookableMonth(date) ? date : firstBookableDay(), start: hours.includes(start) ? start : null };
   const m = openModal(`<div class="modal-head"><h3>🏋️ Prenota ${esc(gym.name)}</h3><button class="icon-btn" data-close>✕</button></div>
     <form class="modal-body" id="gf">
       <div class="row"><label class="field"><span>Giorno</span><input type="date" name="date" value="${f.date}" required ${lockedMonth() ? `min="${nowLocal().date}" max="${lastBookableDay()}"` : ''}></label>
-      <label class="field"><span>Ora</span><select name="start"></select></label></div>
+      <label class="field"><span>Fascia oraria</span><select name="start"></select></label></div>
       <div class="field" style="margin-bottom:6px"><span>Accesso</span></div>
       <div class="gender-pick" id="gp"></div>
       <div class="summary-pill" id="g-week"></div>
-      <p class="muted small" style="margin:0">${{ uno_per_sesso: 'In ogni ora possono allenarsi al massimo un uomo e una donna.', stesso_sesso: 'In ogni ora massimo 2 persone dello stesso sesso.', misto: `In ogni ora massimo ${gym.capacity} persone.` }[cfg.gym_rule] || ''} Ricordati di confermare la presenza sul tablet all'ingresso.</p>
+      <p class="muted small" style="margin:0">${{ uno_per_sesso: 'In ogni fascia possono allenarsi al massimo un uomo e una donna.', stesso_sesso: 'In ogni fascia massimo 2 persone dello stesso sesso.', misto: `In ogni fascia massimo ${gym.capacity} persone.` }[cfg.gym_rule] || ''} Ricordati di confermare la presenza sul tablet all'ingresso.</p>
       <div class="form-error" id="g-err"></div>
     </form>
     <div class="modal-foot"><button class="btn btn-ghost" data-close>Chiudi</button><button class="btn btn-accent" form="gf" id="g-save">Prenota</button></div>`);
@@ -699,13 +718,13 @@ async function gymModal({ date, start }) {
   const refresh = async () => {
     const d = form.date.value;
     const list = (state.week.includes(d) ? state.bookings.filter((x) => x.date === d) : await api(`/api/bookings?date=${d}`).catch(() => [])).filter((x) => x.room_id === gym.id);
-    const taken = (t, g) => list.filter((x) => x.start < toHHMM(toMin(t) + 60) && x.end > t && (!g || x.gender === g));
+    const taken = (t, g) => list.filter((x) => x.start < endOf(t) && x.end > t && (!g || x.gender === g));
     const full = (t) => cfg.gym_rule === 'uno_per_sesso' ? taken(t, 'M').length && taken(t, 'F').length : taken(t).length >= (cfg.gym_rule === 'misto' ? gym.capacity : 2);
-    const past = (t) => d < n.date || (d === n.date && toMin(t) + 60 <= n.min);
+    const past = (t) => d < n.date || (d === n.date && toMin(endOf(t)) <= n.min);
     const cur = form.start.value || f.start;
     const wk = state.me.role === 'admin' ? { used: 0, rotation_blocked: [] } : await api(`/api/gym/week?date=${d}`).catch(() => ({ used: 0, rotation_blocked: [] }));
     const rot = (t) => (wk.rotation_blocked || []).includes(t);
-    form.start.innerHTML = hours.map((t) => `<option value="${t}" ${past(t) || full(t) || rot(t) ? 'disabled' : ''} ${t === cur ? 'selected' : ''}>${t} – ${toHHMM(toMin(t) + 60)}${past(t) ? '' : rot(t) ? '  (rotazione: già tua la settimana vicina)' : full(t) ? '  (completa)' : taken(t).length ? '  (1 posto libero)' : ''}</option>`).join('');
+    form.start.innerHTML = hours.map((t) => `<option value="${t}" ${past(t) || full(t) || rot(t) ? 'disabled' : ''} ${t === cur ? 'selected' : ''}>${t} – ${endOf(t)}${past(t) ? '' : rot(t) ? '  (rotazione: già tua la settimana vicina)' : full(t) ? '  (completa)' : taken(t).length ? '  (1 posto libero)' : ''}</option>`).join('');
     if (form.start.selectedOptions[0]?.disabled) { const first = hours.find((t) => !past(t) && !full(t) && !rot(t)); if (first) form.start.value = first; }
     const t = form.start.value;
     const busyG = (g) => cfg.gym_rule === 'uno_per_sesso' ? taken(t, g).length > 0 : cfg.gym_rule === 'stesso_sesso' ? taken(t).some((x) => x.gender !== g) || taken(t).length >= 2 : taken(t).length >= gym.capacity;
@@ -716,7 +735,7 @@ async function gymModal({ date, start }) {
     if (lim && state.me.role !== 'admin') {
       const mon = mondayOf(d);
       const used = wk.used;
-      $('#g-week', m.el).innerHTML = `🏋️ Settimana dal ${fmtDateShort(mon)}: <b>&nbsp;${String(used).replace('.', ',')} di ${lim} ore&nbsp;</b> prenotate`;
+      $('#g-week', m.el).innerHTML = `🏋️ Settimana dal ${fmtDateShort(mon)}: <b>&nbsp;${used} di ${lim} ingressi&nbsp;</b> prenotati`;
       $('#g-week', m.el).style.color = used >= lim ? 'var(--accent)' : '';
     } else $('#g-week', m.el).style.display = 'none';
   };
@@ -727,7 +746,7 @@ async function gymModal({ date, start }) {
     const btn = $('#g-save', m.el); btn.disabled = true;
     try {
       const st = form.start.value;
-      await api('/api/bookings', { method: 'POST', body: { room_id: gym.id, date: form.date.value, start: st, end: toHHMM(toMin(st) + 60), gender } });
+      await api('/api/bookings', { method: 'POST', body: { room_id: gym.id, date: form.date.value, start: st, end: endOf(st), gender } });
       state.me.gender = gender;
       m.close(); toast("Palestra prenotata! Ti abbiamo inviato un'email");
       if (location.hash === '#mie') renderMine(); else { state.date = form.date.value; refreshCal(); }
