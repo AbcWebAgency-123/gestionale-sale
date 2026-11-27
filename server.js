@@ -1404,6 +1404,8 @@ route('POST', '/api/register', (req, res, ctx) => {
   const companyName = str(ctx.body.company, 120).replace(/\s+/g, ' '); const email = str(ctx.body.email, 200).toLowerCase();
   need(first.length >= 2 && last.length >= 2, 400, 'Inserisci nome e cognome');
   need(companyName.length >= 2 && normCompany(companyName).length >= 2, 400, "Inserisci il nome dell'azienda");
+  // nomi riservati: evitano che un'azienda si registri come "Amministratore" (spesso inserito dall'autocompletamento)
+  need(!/^(amministrator[ei]|amministrazione|admin|administrator|reception|cardo|cardocentrouffici|centrouffici|centroufficicardo|test|prova)$/.test(normCompany(companyName)), 400, "Scrivi il nome reale della tua azienda (la ragione sociale): questo nome non è ammesso.");
   need(EMAIL_RE.test(email), 400, 'Indirizzo email non valido');
   need(ctx.body.privacy === true, 400, 'Per registrarti devi accettare il trattamento dei dati');
   const existing = db.prepare('SELECT * FROM users WHERE email=?').get(email);
