@@ -1110,10 +1110,11 @@ route('POST', '/api/admin/registrations/:id/approve', (req, res, ctx) => {
   need(u.email_verified, 400, "L'utente non ha ancora confermato la sua email");
   const pw = randomPassword();
   const hasMembers = u.company_id && db.prepare('SELECT 1 FROM users WHERE company_id=? AND id<>? AND active=1').get(u.company_id, u.id);
-  const role = u.role === 'admin' ? 'admin' : hasMembers ? u.role : 'referente';
+  // chi si registra da solo non può mai essere amministratore
+  const role = hasMembers ? (u.role === 'referente' ? 'referente' : 'utente') : 'referente';
   db.prepare("UPDATE users SET password_hash=?, active=1, approval='approvato', must_change_password=0, role=? WHERE id=?").run(hashPassword(pw), role, u.id);
   if (u.company_id) db.prepare('UPDATE companies SET active=1 WHERE id=?').run(u.company_id);
-  sendMail(u.email, 'welcome', { name: u.first_name || u.name, company: u.company_name || '', email: u.email, password: pw, quota: u.company_id ? effectiveQuota(u.company_id) : null });
+  sendMail(u.email, 'welcome', { name: u.first_name || u.name, company: u.company_name || '', email: u.email, password: pw, quota: u.company_id ? effectiveQuota(u.company_id) : null, role });
   audit(ctx.user.id, 'iscrizione_approvata', u.email); broadcast();
   send(res, 200, { ok: true });
 }, A);
