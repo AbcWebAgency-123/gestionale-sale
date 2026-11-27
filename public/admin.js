@@ -22,6 +22,7 @@ async function init() {
   if (ME.must_change_password) await passwordModal(true);
   CFG = await api('/api/config');
   renderTopbar(ME, 'admin', CFG.building_name);
+  setupInstallUi(null);
   $('#app').classList.remove('hidden');
   $('#side-nav').innerHTML = SECTIONS.map(([k, l, i]) => `<button data-s="${k}">${i}<span>${l}</span></button>`).join('');
   $$('#side-nav button').forEach((b) => (b.onclick = () => { location.hash = b.dataset.s; }));

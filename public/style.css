@@ -541,3 +541,18 @@ body.center-page { min-height: 100vh; display: flex; flex-direction: column; bac
 @media (max-width: 640px) { .door-banner { flex-wrap: wrap; } .door-banner .btn { width: 100%; } }
 .slot.off { background: repeating-linear-gradient(-45deg, #f3f1ec, #f3f1ec 5px, #ebe8e1 5px, #ebe8e1 10px); cursor: default; }
 .slot.off:hover::after { display: none; }
+
+/* app installata (schermo intero su iPhone/Android): spazio per la barra di stato */
+@media (display-mode: standalone) {
+  .topbar { height: calc(74px + env(safe-area-inset-top)); padding-top: env(safe-area-inset-top); }
+  body { padding-bottom: env(safe-area-inset-bottom); }
+}
+.install-banner { display: flex; align-items: center; gap: 14px; margin: 0 0 14px; padding: 12px 14px; border-radius: 16px; background: #fff; border: 1px solid var(--line); box-shadow: 0 6px 20px rgba(7,75,73,.06); }
+.install-banner img { width: 44px; height: 44px; border-radius: 11px; box-shadow: 0 2px 6px rgba(0,0,0,.12); }
+.install-banner div { flex: 1; font-size: 13px; line-height: 1.35; }
+.install-banner b { display: block; font-size: 14px; color: var(--primary-600, #074b49); }
+.install-banner .x { background: none; border: 0; font-size: 18px; color: var(--muted, #6b7775); cursor: pointer; padding: 4px; }
+.ios-steps { display: grid; gap: 12px; margin: 4px 0 0; padding: 0; list-style: none; counter-reset: s; }
+.ios-steps li { display: flex; gap: 12px; align-items: center; padding: 12px; border-radius: 12px; background: var(--surface-2, #faf8f4); font-size: 14px; }
+.ios-steps li::before { counter-increment: s; content: counter(s); flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--accent, #a7406b); color: #fff; font-weight: 800; display: grid; place-items: center; }
+.ios-steps svg { vertical-align: -4px; }

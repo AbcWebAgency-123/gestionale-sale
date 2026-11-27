@@ -132,6 +132,7 @@ async function init() {
   if (state.me.role === 'admin') state.companies = (await api('/api/admin/companies')).filter((c) => c.active);
   document.title = `Sale Riunioni — ${state.cfg.building_name}`;
   renderTopbar(state.me, location.hash === '#mie' ? 'mie' : 'calendario', state.cfg.building_name);
+  if (!window.__installUi) window.__installUi = setupInstallUi(() => $('#install-slot')); else window.__installUi();
   $('#app').classList.remove('hidden');
   state.date = firstBookableDay();
   if (lockedMonth() && !inBookableMonth(state.date)) state.date = nowLocal().date;
@@ -145,6 +146,7 @@ async function init() {
 // link dal QR del monitor della sala: index.html?prenota=<id sala>&date=AAAA-MM-GG&start=HH:MM
 function deepLinkBooking() {
   const q = new URLSearchParams(location.search);
+  if (q.get('palestra')) { history.replaceState(null, '', location.pathname + location.hash); const g = state.cfg.rooms.find(isGym); if (g) setTimeout(() => gymFlow({ date: nowLocal().date }), 300); return; }
   const id = +q.get('prenota'); if (!id) return;
   history.replaceState(null, '', location.pathname + location.hash);
   const r = state.cfg.rooms.find((x) => x.id === id); if (!r) return toast('Sala non disponibile', 'err');
@@ -159,12 +161,15 @@ function route() {
   $('#view-calendario').classList.toggle('hidden', mine);
   $('#view-mie').classList.toggle('hidden', !mine);
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === (mine ? 'mie' : 'calendario')));
-  if (mine) renderMine(); else { renderCalendarShell(); refreshCal(); startDoorTimer(); }
+  if (mine) renderMine(); else { renderCalendarShell(); refreshCal(); startDoorTimer(); if (window.__installUi) window.__installUi(); }
 }
 
 function showLogin() {
   $('#login').classList.remove('hidden');
-  const demo = [['Sala 1', '#5fd0b8', 'Libera'], ['Sala 2', '#f08bb2', 'Occupata'], ['Sala 3', '#e8b765', 'Libera'], ['Sala 4', '#5fd0b8', 'Libera'], ['Sala 5', '#f08bb2', 'Occupata']];
+  const demo = [['B2B', '#e8b765', 'Libera'], ['Sala White', '#5fd0b8', 'Occupata'], ['Sala Cardo', '#f08bb2', 'Reception'], ['Palestra', '#7fc4a4', 'Libera']];
+  const li = $('#login-install');
+  const showLi = () => li && li.classList.toggle('hidden', !(canInstall() && isMobile()));
+  if (li) { li.onclick = installApp; showLi(); document.addEventListener('install-ready', showLi); }
   $('#login-preview').innerHTML = demo.map(([n, c, s]) => `<div><i style="background:${c}"></i><span>${n}<br><span style="opacity:.7;font-weight:500">${s}</span></span></div>`).join('');
   $('#login-form').onsubmit = async (e) => {
     e.preventDefault();
@@ -204,6 +209,7 @@ function renderCalendarShell() {
       ${state.cfg.rooms.some(isGym) ? '<button class="btn btn-ghost" id="new-gym">🏋️ Palestra</button>' : ''}
       <button class="btn btn-accent" id="new-bk">${ICON.plus} Nuova prenotazione</button>
     </div>
+    <div id="install-slot"></div>
     <div id="door-banner"></div>
     <div id="quota-banner"></div>
     <div id="month-banner"></div>

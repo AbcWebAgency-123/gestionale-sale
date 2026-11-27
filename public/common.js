@@ -141,3 +141,49 @@ function liveUpdates(url, onChange) {
   };
   connect();
 }
+
+/* ---------------------------------------------------------------- app installabile (PWA) */
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isMobile = () => isIOS() || /android/i.test(navigator.userAgent);
+let installEvt = null;
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; document.dispatchEvent(new Event('install-ready')); });
+window.addEventListener('appinstalled', () => { installEvt = null; try { localStorage.setItem('cardo-installed', '1'); } catch {} $$('.install-banner, #dd-install').forEach((x) => x.remove()); toast('App installata: la trovi nella schermata Home'); });
+const canInstall = () => !isStandalone() && (installEvt || isIOS());
+async function installApp() {
+  if (installEvt) { installEvt.prompt(); const r = await installEvt.userChoice.catch(() => null); installEvt = null; return r; }
+  const share = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0a7aff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><path d="M7 8l5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>';
+  if (isIOS()) {
+    openModal(`<div class="modal-head"><h3>📲 Installa l'app CARDO</h3><button class="icon-btn" data-close>✕</button></div>
+      <div class="modal-body"><p class="muted" style="margin-top:0">Su iPhone si installa da Safari in tre tocchi:</p>
+      <ol class="ios-steps"><li><span>Tocca ${share} <b>Condividi</b> nella barra di Safari</span></li><li><span>Scorri e scegli <b>Aggiungi alla schermata Home</b></span></li><li><span>Tocca <b>Aggiungi</b>: l'icona CARDO comparirà tra le tue app</span></li></ol>
+      <p class="muted small" style="margin-bottom:0">Se usi Chrome su iPhone, apri questo indirizzo in Safari.</p></div>
+      <div class="modal-foot"><button class="btn btn-primary" data-close>Ho capito</button></div>`);
+    return;
+  }
+  openModal(`<div class="modal-head"><h3>📲 Installa l'app CARDO</h3><button class="icon-btn" data-close>✕</button></div>
+    <div class="modal-body"><p style="margin-top:0">Apri il menu del browser <b>⋮</b> e scegli <b>Installa app</b> (o <b>Aggiungi a schermata Home</b>).</p><p class="muted small" style="margin-bottom:0">Su computer: in Chrome o Edge c'è l'icona di installazione a destra della barra degli indirizzi.</p></div>
+    <div class="modal-foot"><button class="btn btn-primary" data-close>Ho capito</button></div>`);
+}
+// voce nel menu utente + banner (solo su telefono, finché non viene chiuso)
+function setupInstallUi(bannerHost) {
+  const addMenu = () => {
+    if (!canInstall() || $('#dd-install') || !$('#dd-pw')) return;
+    const b = document.createElement('button'); b.id = 'dd-install'; b.textContent = "📲 Installa l'app"; b.onclick = installApp;
+    $('#dd-pw').before(b);
+  };
+  const addBanner = () => {
+    const host = typeof bannerHost === 'function' ? bannerHost() : bannerHost;
+    if (!host || !canInstall() || !isMobile() || $('.install-banner')) return;
+    try { if (localStorage.getItem('cardo-install-hide')) return; } catch {}
+    const el = document.createElement('div'); el.className = 'install-banner';
+    el.innerHTML = `<img src="brand/app-192.png" alt=""><div><b>Installa l'app CARDO</b>Prenoti e apri la porta con un tocco, direttamente dalla schermata Home.</div><button class="btn btn-accent btn-sm" data-i>Installa</button><button class="x" title="Non ora" data-x>✕</button>`;
+    host.prepend(el);
+    $('[data-i]', el).onclick = installApp;
+    $('[data-x]', el).onclick = () => { el.remove(); try { localStorage.setItem('cardo-install-hide', '1'); } catch {} };
+  };
+  addMenu(); addBanner();
+  document.addEventListener('install-ready', () => { addMenu(); addBanner(); });
+  return addBanner;
+}
