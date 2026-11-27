@@ -73,6 +73,13 @@ function show() {
   ({ panoramica, prenotazioni, iscrizioni, aziende, utenti, sale, palestra, penali, email, chiusure, impostazioni, registro }[s] || panoramica)();
 }
 const C = () => $('#content');
+// da telefono le tabelle diventano schede: ogni cella riceve il nome della sua colonna
+new MutationObserver(() => {
+  $$('table.tbl').forEach((t) => {
+    const heads = $$('thead th', t).map((th) => th.textContent.trim());
+    $$('tbody tr', t).forEach((tr) => [...tr.children].forEach((td, i) => { if (heads[i] && !td.dataset.label) td.dataset.label = heads[i]; }));
+  });
+}).observe(document.body, { childList: true, subtree: true });
 const DEL = (id, attr = 'data-rm') => `<button class="btn btn-danger-ghost btn-sm" ${attr}="${id}" title="Elimina definitivamente">🗑 Elimina</button>`;
 // eliminazione definitiva con conferma
 async function hardDelete(url, title, what, after, okMsg = 'Eliminato') {

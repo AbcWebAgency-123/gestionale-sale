@@ -138,6 +138,8 @@ async function init() {
   if (lockedMonth() && !inBookableMonth(state.date)) state.date = nowLocal().date;
   state.month = state.date.slice(0, 7);
   window.addEventListener('hashchange', route);
+  let rz; let wasNarrow = window.innerWidth < 700;
+  window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { const nw = window.innerWidth < 700; if (nw !== wasNarrow) { wasNarrow = nw; if (location.hash !== '#mie' && state.view === 'giorno') renderGrid(); } }, 200); });
   route();
   deepLinkBooking();
   liveUpdates('/api/events', async () => { await refreshCfg(); try { state.me = await api('/api/me'); } catch { /* */ } if (location.hash === '#mie') renderMine(); else refreshCal(); });
@@ -219,7 +221,7 @@ function renderCalendarShell() {
       <span><i style="background:var(--primary);border-color:var(--primary)"></i>Prenotazioni della tua azienda</span>
       <span><i style="background:#e6f1ef;border-color:#b5d4d0"></i>Prenotate da altre aziende</span>
       <span><i style="background:repeating-linear-gradient(-45deg,#fafbfd,#fafbfd 3px,#eceff5 3px,#eceff5 6px);border-color:var(--line)"></i>Orario passato</span>
-      <span style="margin-left:auto">Suggerimento: clicca su uno spazio libero, oppure trascina per scegliere più mezz'ore. In palestra si prenota un'ora alla volta.</span>
+      <span style="margin-left:auto">Suggerimento: clicca su uno spazio libero, oppure trascina per scegliere più mezz'ore. In palestra si prenota una fascia alla volta.</span>
     </div></div>`;
   const step = (dir) => {
     if (state.view === 'mese') { state.month = addMonths(state.month, dir); return refreshCal(); }
@@ -323,7 +325,10 @@ function renderGrid() {
     state.gridOpen = Math.floor(o / sm) * sm; state.gridClose = Math.ceil(c / sm) * sm; }
   const offFor = (r, t) => { const m = toMin(t); if (isGym(r) && gymSlotList().length) return !gymSlotAt(t); return m < toMin(cfg.open_time) || m >= toMin(cfg.close_time); };
   const hoursFor = (r) => isGym(r) && gymSlotList().length ? [toMin(gymSlotList()[0].start), toMin(gymSlotList().at(-1).end)] : [toMin(cfg.open_time), toMin(cfg.close_time)];
-  const N = slotsCount(); const cols = `64px repeat(${rooms.length}, minmax(150px, 1fr))`;
+  // da telefono tutte le sale stanno nello schermo (colonne strette), da computer colonne larghe
+  const narrow = window.innerWidth < 700;
+  const N = slotsCount(); const cols = narrow ? `40px repeat(${rooms.length}, minmax(0, 1fr))` : `64px repeat(${rooms.length}, minmax(150px, 1fr))`;
+  $('#grid-wrap').classList.toggle('narrow', narrow);
   const dayBookings = state.bookings.filter((b) => b.date === d);
   const isToday = d === n.date;
   const isPastSlot = (i) => !inBookableMonth(d) || d < n.date || (isToday && toMin(slotTime(i)) + cfg.slot_minutes <= n.min);
@@ -741,7 +746,7 @@ async function gymModal({ date, start }) {
     if (lim && state.me.role !== 'admin') {
       const mon = mondayOf(d);
       const used = wk.used;
-      $('#g-week', m.el).innerHTML = `🏋️ Settimana dal ${fmtDateShort(mon)}: <b>&nbsp;${used} di ${lim} ingressi&nbsp;</b> prenotati`;
+      $('#g-week', m.el).innerHTML = `<span>🏋️ Settimana dal ${fmtDateShort(mon)}: <b>${used} di ${lim} ingressi</b> prenotati</span>`;
       $('#g-week', m.el).style.color = used >= lim ? 'var(--accent)' : '';
     } else $('#g-week', m.el).style.display = 'none';
   };
